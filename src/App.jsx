@@ -10,12 +10,13 @@ export default function App() {
   const setProfile     = useAppStore(s => s.setProfile);
   const setUserFunds   = useAppStore(s => s.setUserFunds);
   const setUserWeights = useAppStore(s => s.setUserWeights);
+  const profile        = useAppStore(s => s.profile);
+  const userFunds      = useAppStore(s => s.userFunds);
 
-  const [session,     setSession]      = useState(null);
-  const [profile,     setLocalProfile] = useState(null);
-  const [userFunds,   setLocalFunds]   = useState([]);
-  const [authLoading, setAuthLoading]  = useState(true);
-  const [dataLoading, setDataLoading]  = useState(false);
+  const [session,     setSession]     = useState(null);
+  const [authLoading, setAuthLoading] = useState(true);
+  const [dataLoading, setDataLoading] = useState(false);
+  const [authError,   setAuthError]   = useState(null);
 
   const loadUserData = async (userId) => {
     setDataLoading(true);
@@ -23,39 +24,78 @@ export default function App() {
       const [profileRes, fundsRes, weightsRes] = await Promise.all([
         supabase.from('profiles').select('*').eq('id', userId).single(),
         supabase.from('user_funds').select('*').eq('user_id', userId).order('sort_order'),
-        supabase.from('user_weights').select('*').eq('user_id', userId).single(),
+        supabase.from('user_weights').select('*').eq('user_id', userId).maybeSingle(),
       ]);
-      const prof  = profileRes.data  || null;
-      const funds = fundsRes.data    || [];
-      const wts   = weightsRes.data  || null;
-      setLocalProfile(prof); setLocalFunds(funds);
-      setProfile(prof); setUserFunds(funds); setUserWeights(wts);
-    } catch (e) { console.error('loadUserData error:', e); }
+      setProfile(profileRes.data   || null);
+      setUserFunds(fundsRes.data   || []);
+      setUserWeights(weightsRes.data || null);
+    } catch (e) {
+      console.error('loadUserData error:', e);
+    }
     setDataLoading(false);
   };
 
   useEffect(() => {
+    // Handle Supabase auth redirect hash errors (e.g. expired OTP link)
+    const hash = window.location.hash;
+    if (hash.includes('error=')) {
+      const params = new URLSearchParams(hash.replace('#', ''));
+      const desc = params.get('error_description') || 'Authentication error';
+      setAuthError(desc.replace(/\+/g, ' '));
+      // Clean the URL so the error hash doesn't persist on refresh
+      window.history.replaceState(null, '', window.location.pathname);
+      setAuthLoading(false);
+      return;
+    }
+
+    // Normal session boot
     supabase.auth.getSession().then(async ({ data: { session: s } }) => {
-      setSession(s); setUser(s?.user ?? null);
+      setSession(s);
+      setUser(s?.user ?? null);
       if (s?.user) await loadUserData(s.user.id);
       setAuthLoading(false);
     });
+
     const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, s) => {
-      setSession(s); setUser(s?.user ?? null);
+      setSession(s);
+      setUser(s?.user ?? null);
       if (s?.user && (event === 'SIGNED_IN' || event === 'TOKEN_REFRESHED')) {
         await loadUserData(s.user.id);
       }
       if (event === 'SIGNED_OUT') {
-        setLocalProfile(null); setLocalFunds([]);
-        setProfile(null); setUserFunds([]); setUserWeights(null);
+        setProfile(null);
+        setUserFunds([]);
+        setUserWeights(null);
       }
     });
+
     return () => subscription.unsubscribe();
   }, []);
 
+  // Show auth error (e.g. expired confirmation link) with option to go back to login
+  if (authError) {
+    return (
+      <div style={{ minHeight:'100vh', display:'flex', flexDirection:'column', alignItems:'center',
+        justifyContent:'center', background:'var(--bg)', gap:'16px' }}>
+        <div className="app-logo" style={{ fontSize:'22px' }}>Fund<span>Lens</span></div>
+        <div style={{ background:'var(--surface)', border:'1px solid var(--danger,#e55)', borderRadius:'8px',
+          padding:'24px 32px', maxWidth:'400px', textAlign:'center' }}>
+          <p style={{ color:'var(--danger,#e55)', marginBottom:'12px', fontWeight:600 }}>Link Expired</p>
+          <p style={{ color:'var(--text2)', fontSize:'13px', marginBottom:'20px' }}>{authError}</p>
+          <button onClick={() => setAuthError(null)}
+            style={{ background:'var(--accent)', color:'#fff', border:'none', borderRadius:'6px',
+              padding:'10px 24px', cursor:'pointer', fontWeight:600 }}>
+            Back to Sign In
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   if (authLoading || dataLoading) {
     return (
-      <div style={{ minHeight:'100vh', display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', background:'var(--bg)', gap:'16px' }}>
+      <div style={{ minHeight:'100vh', display:'flex', flexDirection:'column', alignItems:'center',
+        justifyContent:'center', background:'var(--bg)', gap:'16px' }}>
         <div className="app-logo" style={{ fontSize:'22px' }}>Fund<span>Lens</span></div>
         <span className="spinner" style={{ width:24, height:24, borderWidth:3 }} />
         <p style={{ fontSize:'12px', color:'var(--text3)' }}>{authLoading ? 'Checking session…' : 'Loading your profile…'}</p>
