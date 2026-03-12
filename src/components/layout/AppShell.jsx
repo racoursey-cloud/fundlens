@@ -28,32 +28,32 @@ export default function AppShell({ userFunds, profile }) {
           <div className="app-logo">Fund<span>Lens</span></div>
           {source==='live' && <span className="src-live">LIVE</span>}
           {source==='seed' && <span className="src-seed">SEED DATA</span>}
-          {source==='loading' && <span className="src-partial">RUNNING…</span>}
+          {source==='loading' && <span className="src-partial">RUNNINGâ¦</span>}
         </div>
         <div style={{ display:'flex', alignItems:'center', gap:'10px' }}>
           {lastRun && <span style={{ fontSize:'11px', color:'var(--text3)' }}>Last run: {new Date(lastRun).toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit'})}</span>}
           {profile?.name && <span style={{ fontSize:'12px', color:'var(--text2)', fontWeight:600 }}>{profile.name}</span>}
           <button className="btn btn-primary" disabled={loading} onClick={() => alert('Pipeline coming in Phase 2!')}>
-            {loading ? <><span className="spinner" style={{ width:14, height:14, borderWidth:2 }} /> Analyzing…</> : '▶ Run Analysis'}
+            {loading ? <><span className="spinner" style={{ width:14, height:14, borderWidth:2 }} /> Analyzingâ¦</> : 'â¶ Run Analysis'}
           </button>
           <button className="btn btn-ghost btn-sm" onClick={() => supabase.auth.signOut()}>Sign out</button>
         </div>
       </header>
       {errors.length > 0 && (
         <div style={{ background:'var(--amber-bg)', borderBottom:'1px solid var(--amber-bd)', padding:'10px 24px', fontSize:'12px', color:'var(--amber)' }}>
-          ⚠️ {errors[0]}{errors.length > 1 ? ` (+${errors.length-1} more)` : ''}
+          â ï¸ {errors[0]}{errors.length > 1 ? ` (+${errors.length-1} more)` : ''}
         </div>
       )}
       <div className="tabs">
-        {TABS.map(t => <button key={t.id} className={`tab${activeTab===t.id?' on':''}`} onClick={() => setTab(t.id)}>{t.label}</button>)}
+        {TABS.map(t => <button key={t.id} data-label={t.label} className={`tab${activeTab===t.id?' on':''}`} onClick={() => setTab(t.id)}>{t.label}</button>)}
       </div>
       <main style={{ padding:'24px', maxWidth:'1200px', margin:'0 auto' }}>
         {activeTab==='rank' && <RankingsPlaceholder funds={seedFunds} source={source} />}
-        {activeTab==='thesis' && <Placeholder icon="📰" title="Investment Thesis" msg="Run Analysis to generate your macro thesis and sector outlook." />}
-        {activeTab==='portfolio' && <Placeholder icon="🥧" title="Portfolio Allocation" msg="Run Analysis to build a risk-adjusted allocation." />}
-        {activeTab==='holdings' && <Placeholder icon="🔍" title="Fund Holdings" msg="Run Analysis to load holdings from SEC EDGAR." />}
-        {activeTab==='matrix' && <Placeholder icon="⚖️" title="Factor Matrix" msg="Run Analysis to see all 4 factors side by side." />}
-        {activeTab==='history' && <Placeholder icon="📋" title="Run History" msg="Your past analysis runs will appear here." />}
+        {activeTab==='thesis' && <Placeholder icon="ð°" title="Investment Thesis" msg="Run Analysis to generate your macro thesis and sector outlook." />}
+        {activeTab==='portfolio' && <Placeholder icon="ð¥§" title="Portfolio Allocation" msg="Run Analysis to build a risk-adjusted allocation." />}
+        {activeTab==='holdings' && <Placeholder icon="ð" title="Fund Holdings" msg="Run Analysis to load holdings from SEC EDGAR." />}
+        {activeTab==='matrix' && <Placeholder icon="âï¸" title="Factor Matrix" msg="Run Analysis to see all 4 factors side by side." />}
+        {activeTab==='history' && <Placeholder icon="ð" title="Run History" msg="Your past analysis runs will appear here." />}
         {activeTab==='settings' && <SettingsPlaceholder profile={profile} userFunds={userFunds} />}
       </main>
     </div>
@@ -61,11 +61,11 @@ export default function AppShell({ userFunds, profile }) {
 }
 
 function RankingsPlaceholder({ funds, source }) {
-  if (!funds.length) return <Placeholder icon="📊" title="Rankings" msg="No funds yet. Go to Settings to add funds." />;
+  if (!funds.length) return <Placeholder icon="ð" title="Rankings" msg="No funds yet. Go to Settings to add funds." />;
   return (
     <div className="card fade-in">
       <div className="card-header">
-        <div><span style={{ fontFamily:"'Libre Baskerville',serif", fontWeight:700, fontSize:'15px' }}>Fund Rankings</span>{source==='seed' && <span className="note" style={{ marginLeft:'10px' }}>Showing seed scores — click Run Analysis for live scoring</span>}</div>
+        <div><span style={{ fontFamily:"'Libre Baskerville',serif", fontWeight:700, fontSize:'15px' }}>Fund Rankings</span>{source==='seed' && <span className="note" style={{ marginLeft:'10px' }}>Showing seed scores â click Run Analysis for live scoring</span>}</div>
         <span className="note">{funds.length} funds</span>
       </div>
       <div style={{ overflowX:'auto' }}>
@@ -104,7 +104,7 @@ function SettingsPlaceholder({ profile, userFunds }) {
       <div className="card">
         <div className="card-header"><span style={{ fontFamily:"'Libre Baskerville',serif", fontWeight:700 }}>Your Profile</span></div>
         <div className="card-body" style={{ fontSize:'13px' }}>
-          {[['Name',profile?.name||'—'],['Company',profile?.company_name||'—'],['Funds',`${userFunds.length} fund${userFunds.length!==1?'s':''} in universe`]].map(([label,value])=>(
+          {[['Name',profile?.name||'â'],['Company',profile?.company_name||'â'],['Funds',`${userFunds.length} fund${userFunds.length!==1?'s':''} in universe`]].map(([label,value])=>(
             <div key={label} style={{ display:'flex', justifyContent:'space-between', padding:'8px 0', borderBottom:'1px solid var(--bg)' }}>
               <span style={{ color:'var(--text3)', fontWeight:600 }}>{label}</span>
               <span style={{ fontWeight:600 }}>{value}</span>
