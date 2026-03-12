@@ -22,7 +22,7 @@ export default function App() {
     setDataLoading(true);
     try {
       const [profileRes, fundsRes, weightsRes] = await Promise.all([
-        supabase.from('profiles').select('*').eq('id', userId).single(),
+        supabase.from('profiles').select('*').eq('id', userId).maybeSingle(),
         supabase.from('user_funds').select('*').eq('user_id', userId).order('sort_order'),
         supabase.from('user_weights').select('*').eq('user_id', userId).maybeSingle(),
       ]);
@@ -98,7 +98,7 @@ export default function App() {
         justifyContent:'center', background:'var(--bg)', gap:'16px' }}>
         <div className="app-logo" style={{ fontSize:'22px' }}>Fund<span>Lens</span></div>
         <span className="spinner" style={{ width:24, height:24, borderWidth:3 }} />
-        <p style={{ fontSize:'12px', color:'var(--text3)' }}>{authLoading ? 'Checking session…' : 'Loading your profile…'}</p>
+        <p style={{ fontSize:'12px', color:'var(--text3)' }}>{authLoading ? 'Checking sessionâ¦' : 'Loading your profileâ¦'}</p>
       </div>
     );
   }
