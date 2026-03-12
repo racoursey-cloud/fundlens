@@ -57,8 +57,8 @@ export default function SetupWizard({ onComplete }) {
   };
 
   const handleNext=()=>{
-    if(step===1&&!data.name.trim()){alert('Please enter your name.');return;}
-    if(step===2&&data.funds.length===0){alert('Please add at least one fund.');return;}
+    if(step===1&&!data.name.trim()){setTickerError('Please add at least one fund before continuing.');return;}
+    if(step===2&&data.funds.length===0){setTickerError('Please add at least one fund before continuing.');return;}
     if(step===3){const tot=Object.values(data.weights).reduce((s,v)=>s+v,0);if(tot!==100)setData(d=>({...d,weights:normalizeWeights(d.weights)}));}
     setStep(s=>s+1);
   };
@@ -91,7 +91,7 @@ export default function SetupWizard({ onComplete }) {
             <button className="btn btn-ghost btn-sm" onClick={applyCode}>Load Funds</button>
           </div>
           {data.codeError&&<p style={{fontSize:'11px',color:'var(--red)',marginTop:'5px'}}>{data.codeError}</p>}
-          {data.companyName&&<p style={{fontSize:'11px',color:'var(--green)',marginTop:'5px',fontWeight:600}}>✓ {data.companyName} — {data.funds.length} funds loaded</p>}
+          {data.companyName&&<p style={{fontSize:'11px',color:'var(--green)',marginTop:'5px',fontWeight:600}}>â {data.companyName} â {data.funds.length} funds loaded</p>}
         </div>
       </div>
     ),
@@ -109,7 +109,7 @@ export default function SetupWizard({ onComplete }) {
               {data.funds.map(f=>(
                 <div key={f.ticker} className="fund-chip">
                   <span style={{fontFamily:"'JetBrains Mono',monospace",fontSize:'11px'}}>{f.ticker}</span>
-                  <button onClick={()=>setData(d=>({...d,funds:d.funds.filter(x=>x.ticker!==f.ticker)}))}>×</button>
+                  <button onClick={()=>setData(d=>({...d,funds:d.funds.filter(x=>x.ticker!==f.ticker)}))}>Ã</button>
                 </div>
               ))}
             </div>}
@@ -138,7 +138,7 @@ export default function SetupWizard({ onComplete }) {
             ))}
           </div>
           <div style={{borderTop:'1px solid var(--border)',paddingTop:'20px'}}>
-            <label className="label" style={{display:'block',marginBottom:'4px'}}>Risk Tolerance <span style={{fontFamily:"'JetBrains Mono',monospace",color:'var(--text)',marginLeft:'8px',textTransform:'none',letterSpacing:0,fontSize:'13px'}}>{rt}/9 — {riskLabel(rt)}</span></label>
+            <label className="label" style={{display:'block',marginBottom:'4px'}}>Risk Tolerance <span style={{fontFamily:"'JetBrains Mono',monospace",color:'var(--text)',marginLeft:'8px',textTransform:'none',letterSpacing:0,fontSize:'13px'}}>{rt}/9 â {riskLabel(rt)}</span></label>
             <input type="range" min="1" max="9" step="1" value={rt} onChange={e=>setData(d=>({...d,risk:parseInt(e.target.value)}))} style={{width:'100%',accentColor:'var(--accent)',marginBottom:'8px'}} />
             <div style={{background:'var(--surface2)',borderRadius:'6px',padding:'10px 12px',fontSize:'11px',color:'var(--text2)',lineHeight:1.5}}>{riskDescription(rt)}</div>
           </div>
@@ -150,11 +150,11 @@ export default function SetupWizard({ onComplete }) {
       const top=WIZARD_FACTORS.slice().sort((a,b)=>(W[b.key]||0)-(W[a.key]||0))[0];
       return(
         <div style={{textAlign:'center',padding:'16px 0'}}>
-          <div style={{fontSize:'44px',marginBottom:'14px'}}>📊</div>
+          <div style={{fontSize:'44px',marginBottom:'14px'}}>ð</div>
           <h2 style={{fontFamily:"'Libre Baskerville',serif",fontSize:'20px',marginBottom:'8px'}}>You're all set, {data.name||'there'}!</h2>
-          <p style={{fontSize:'12px',color:'var(--text2)',lineHeight:1.7,marginBottom:'18px'}}>FundLens will look inside each fund, read today's world, and surface the funds positioned for the next 30–90 days.</p>
+          <p style={{fontSize:'12px',color:'var(--text2)',lineHeight:1.7,marginBottom:'18px'}}>FundLens will look inside each fund, read today's world, and surface the funds positioned for the next 30â90 days.</p>
           <div style={{background:'var(--surface2)',borderRadius:'8px',padding:'16px',textAlign:'left',fontSize:'12px',color:'var(--text2)'}}>
-            {[['Funds',`${data.funds.length} funds`],data.companyName?['Company',data.companyName]:null,['Top factor',`${top.emoji} ${top.label} (${W[top.key]}%)`],['Risk',`${data.risk}/9 — ${riskLabel(data.risk)}`]].filter(Boolean).map(([l,v])=>(
+            {[['Funds',`${data.funds.length} funds`],data.companyName?['Company',data.companyName]:null,['Top factor',`${top.emoji} ${top.label} (${W[top.key]}%)`],['Risk',`${data.risk}/9 â ${riskLabel(data.risk)}`]].filter(Boolean).map(([l,v])=>(
               <div key={l} style={{display:'flex',justifyContent:'space-between',marginBottom:'8px',paddingBottom:'8px',borderBottom:'1px solid var(--border)'}}>
                 <span>{l}</span><span style={{fontWeight:700,color:'var(--text)'}}>{v}</span>
               </div>
@@ -179,12 +179,12 @@ export default function SetupWizard({ onComplete }) {
         </div>
         <div className="wizard-body">{steps[step]()}</div>
         <div className="wizard-footer">
-          <div>{step>1?<button className="btn btn-ghost" onClick={()=>setStep(s=>s-1)}>← Back</button>:<div/>}</div>
+          <div>{step>1?<button className="btn btn-ghost" onClick={()=>setStep(s=>s-1)}>â Back</button>:<div/>}</div>
           <div style={{display:'flex',alignItems:'center',gap:'12px'}}>
             <span style={{fontSize:'11px',color:'var(--text3)'}}>{step} of 4</span>
             {step<4
-              ?<button className="btn btn-primary" onClick={handleNext}>Continue →</button>
-              :<button className="btn btn-green" onClick={handleFinish} disabled={saving}>{saving?<><span className="spinner" style={{width:14,height:14,borderWidth:2}}/> Saving...</>:'▶ Start Analysis'}</button>}
+              ?<button className="btn btn-primary" onClick={handleNext}>Continue â</button>
+              :<button className="btn btn-green" onClick={handleFinish} disabled={saving}>{saving?<><span className="spinner" style={{width:14,height:14,borderWidth:2}}/> Saving...</>:'â¶ Start Analysis'}</button>}
           </div>
         </div>
       </div>
