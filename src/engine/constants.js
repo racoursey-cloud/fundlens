@@ -50,6 +50,7 @@ export const COMPANY_CODES = {
   TA26: { name: 'TerrAscend', funds: DEFAULT_FUNDS },
 };
 
+// Phase 2: per-fund alert text displayed in Rankings tab
 export const ALERTS = {
   PRPFX: 'Single-manager risk (Cuggino)', QFVRX: 'Fee waiver expires 7/31/2026',
   RNWGX: 'Benchmark changed 1/1/2026', VWIGX: 'Beta 1.34; Baillie Gifford modifying',
@@ -75,7 +76,7 @@ export const DEFAULT_WEIGHTS = { mandateScore:40, momentum:25, riskAdj:20, manag
 
 export const FACTOR_LABELS = {
   mandateScore:   { label:'Macro Fit',   desc:"How well this fund's investment mandate aligns with current macro conditions" },
-  momentum:       { label:'Market Feel', desc:"Recent price trend (63-day momentum) — the market's current vote on this fund" },
+  momentum:       { label:'Market Feel', desc:"Recent price trend (63-day momentum) â the market's current vote on this fund" },
   riskAdj:        { label:'Room to Run', desc:'Return quality relative to risk (Sharpe ratio)' },
   managerQuality: { label:'Foundations', desc:'Management team quality, fund stability, parent company reputation, and fee structure' },
 };
@@ -83,7 +84,7 @@ export const FACTOR_LABELS = {
 export const WIZARD_STEPS = {
   titles: ['','Your Investor Profile','Your Fund Universe','What Matters to You','Ready to Go!'],
   subs: ['',
-    'Tell us your name and — if your employer has a FundLens code — enter it to instantly load your 401K fund options.',
+    'Tell us your name and â if your employer has a FundLens code â enter it to instantly load your 401K fund options.',
     'Review the funds available in your 401K. You can add or remove tickers at any time.',
     'These four factors drive how FundLens ranks your funds. Adjust them to reflect what you personally believe matters most.',
     'FundLens will analyze the world right now and surface the funds built for this moment.',
@@ -91,10 +92,10 @@ export const WIZARD_STEPS = {
 };
 
 export const WIZARD_FACTORS = [
-  { key:'mandateScore', label:'Macro Fit', emoji:'🌍', what:"How well does this fund's strategy match what's happening in the economy right now?", conservative:"Matters somewhat — you want funds that aren't fighting the macro tide.", aggressive:"Matters a lot — you're betting on the macro call being right." },
-  { key:'momentum', label:'Market Feel', emoji:'📈', what:'Is this fund already moving in the right direction? Recent 63-day price trend.', conservative:"Matters less — past movement doesn't guarantee safety.", aggressive:"Matters a lot — you want funds the market is already rewarding." },
-  { key:'riskAdj', label:'Room to Run', emoji:'⚖️', what:'Does this fund deliver returns without wild swings? (Sharpe ratio)', conservative:'Matters most — you want steady returns, not a rollercoaster.', aggressive:"Matters less — you're willing to accept volatility for bigger gains." },
-  { key:'managerQuality', label:'Foundations', emoji:'🏛️', what:"How consistently has this fund's management team executed over time?", conservative:"Matters more — you want a fund you can trust to do what it says.", aggressive:"Matters as a floor — you still don't want a badly run fund." },
+  { key:'mandateScore', label:'Macro Fit', emoji:'ð', what:"How well does this fund's strategy match what's happening in the economy right now?", conservative:"Matters somewhat â you want funds that aren't fighting the macro tide.", aggressive:"Matters a lot â you're betting on the macro call being right." },
+  { key:'momentum', label:'Market Feel', emoji:'ð', what:'Is this fund already moving in the right direction? Recent 63-day price trend.', conservative:"Matters less â past movement doesn't guarantee safety.", aggressive:"Matters a lot â you want funds the market is already rewarding." },
+  { key:'riskAdj', label:'Room to Run', emoji:'âï¸', what:'Does this fund deliver returns without wild swings? (Sharpe ratio)', conservative:'Matters most â you want steady returns, not a rollercoaster.', aggressive:"Matters less â you're willing to accept volatility for bigger gains." },
+  { key:'managerQuality', label:'Foundations', emoji:'ðï¸', what:"How consistently has this fund's management team executed over time?", conservative:"Matters more â you want a fund you can trust to do what it says.", aggressive:"Matters as a floor â you still don't want a badly run fund." },
 ];
 
 export const DEFAULT_WORLD_TTL_MINS = 60;
