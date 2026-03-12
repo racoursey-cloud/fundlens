@@ -1,0 +1,227 @@
+/* FundLens v4 — Global Styles */
+@import url('https://fonts.googleapis.com/css2?family=Libre+Baskerville:ital,wght@0,400;0,700;1,400&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap');
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --bg:       #0e0f11;
+  --surface:  #16181c;
+  --surface2: #1c1f24;
+  --surface3: #22262d;
+  --border:   #2a2e36;
+  --border2:  #333840;
+  --text:     #e8eaf0;
+  --text2:    #9ba3b2;
+  --text3:    #5c6575;
+  --accent:   #4f8ef7;
+  --accent2:  #3a7de0;
+  --green:    #34d399;
+  --green-bg: #0d2b22;
+  --green-bd: #1a4d3a;
+  --red:      #f87171;
+  --red-bg:   #2b0d0d;
+  --red-bd:   #4d1a1a;
+  --amber:    #fbbf24;
+  --amber-bg: #2b2007;
+  --amber-bd: #4d3a0d;
+  --purple:   #a78bfa;
+}
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+html { font-size: 14px; -webkit-font-smoothing: antialiased; }
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'Inter', sans-serif;
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+/* ── Inputs ── */
+input[type="text"],
+input[type="email"],
+input[type="password"],
+input[type="number"],
+textarea,
+select {
+  width: 100%;
+  background: var(--surface2);
+  border: 1px solid var(--border2);
+  border-radius: 8px;
+  color: var(--text);
+  font-family: 'Inter', sans-serif;
+  font-size: 13px;
+  padding: 9px 12px;
+  outline: none;
+  transition: border-color 0.15s;
+}
+input:focus, textarea:focus, select:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(79,142,247,0.15);
+}
+input::placeholder { color: var(--text3); }
+
+/* ── Buttons ── */
+.btn {
+  display: inline-flex; align-items: center; gap: 6px;
+  border: none; border-radius: 8px; cursor: pointer;
+  font-family: 'Inter', sans-serif; font-size: 13px; font-weight: 600;
+  padding: 8px 16px; transition: all 0.15s; white-space: nowrap;
+}
+.btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.btn-primary  { background: var(--accent); color: #fff; }
+.btn-primary:hover:not(:disabled) { background: var(--accent2); }
+.btn-ghost    { background: var(--surface3); color: var(--text2); border: 1px solid var(--border2); }
+.btn-ghost:hover:not(:disabled)   { background: var(--border2); color: var(--text); }
+.btn-green    { background: var(--green); color: #0a1a14; }
+.btn-green:hover:not(:disabled)   { filter: brightness(1.1); }
+.btn-sm       { font-size: 12px; padding: 6px 12px; }
+
+/* ── Cards ── */
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  overflow: hidden;
+}
+.card-header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface2);
+}
+.card-body { padding: 20px; }
+
+/* ── App Header ── */
+.app-header {
+  position: sticky; top: 0; z-index: 100;
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 12px 24px;
+  background: rgba(14,15,17,0.92);
+  backdrop-filter: blur(12px);
+  border-bottom: 1px solid var(--border);
+}
+.app-logo {
+  font-family: 'Libre Baskerville', serif;
+  font-size: 18px; font-weight: 700; color: var(--text);
+  letter-spacing: -0.5px;
+}
+.app-logo span { color: var(--accent); }
+
+/* ── Tabs ── */
+.tabs {
+  display: flex; gap: 2px; padding: 12px 24px 0;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+  overflow-x: auto;
+}
+.tab {
+  background: none; border: none; cursor: pointer;
+  color: var(--text3); font-family: 'Inter', sans-serif;
+  font-size: 13px; font-weight: 500;
+  padding: 8px 16px 10px;
+  border-bottom: 2px solid transparent;
+  transition: all 0.15s; white-space: nowrap;
+}
+.tab:hover { color: var(--text2); }
+.tab.on    { color: var(--accent); border-bottom-color: var(--accent); font-weight: 600; }
+
+/* ── Tables ── */
+.data-table {
+  width: 100%; border-collapse: collapse; font-size: 13px;
+}
+.data-table th {
+  padding: 10px 16px; text-align: left;
+  font-size: 11px; font-weight: 600; letter-spacing: 0.06em;
+  text-transform: uppercase; color: var(--text3);
+  border-bottom: 1px solid var(--border);
+  background: var(--surface2);
+  white-space: nowrap;
+}
+.data-table td {
+  padding: 11px 16px; border-bottom: 1px solid var(--border);
+  color: var(--text2);
+}
+.data-table tbody tr:last-child td { border-bottom: none; }
+.data-table tbody tr:hover td { background: var(--surface2); }
+
+/* ── Score badges ── */
+.score-lg {
+  font-family: 'Libre Baskerville', serif;
+  font-size: 28px; font-weight: 700; color: var(--text);
+}
+.score-md {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 15px; font-weight: 600; color: var(--text);
+}
+
+/* ── Source badges ── */
+.src-live    { background: #0d2b22; color: var(--green); border: 1px solid var(--green-bd); border-radius: 5px; font-size: 10px; font-weight: 700; letter-spacing: 0.08em; padding: 3px 7px; }
+.src-seed    { background: var(--surface3); color: var(--text3); border: 1px solid var(--border2); border-radius: 5px; font-size: 10px; font-weight: 700; letter-spacing: 0.08em; padding: 3px 7px; }
+.src-partial { background: var(--amber-bg); color: var(--amber); border: 1px solid var(--amber-bd); border-radius: 5px; font-size: 10px; font-weight: 700; letter-spacing: 0.08em; padding: 3px 7px; }
+
+/* ── Badge ── */
+.badge { display: inline-block; border-radius: 5px; font-size: 10px; font-weight: 700; letter-spacing: 0.06em; padding: 2px 7px; }
+
+/* ── Note / label ── */
+.note  { font-size: 11px; color: var(--text3); line-height: 1.5; }
+.label { font-size: 11px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text3); }
+
+/* ── Fund chip ── */
+.fund-chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  background: var(--surface3); border: 1px solid var(--border2);
+  border-radius: 20px; padding: 4px 10px 4px 12px;
+}
+.fund-chip button {
+  background: none; border: none; cursor: pointer;
+  color: var(--text3); font-size: 14px; line-height: 1;
+  padding: 0 2px;
+}
+.fund-chip button:hover { color: var(--red); }
+
+/* ── Spinner ── */
+.spinner {
+  display: inline-block;
+  width: 18px; height: 18px;
+  border: 2px solid var(--border2);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ── Wizard ── */
+.wizard-wrap {
+  min-height: 100vh; display: flex; align-items: center; justify-content: center;
+  padding: 24px; background: var(--bg);
+}
+.wizard-card {
+  width: 100%; max-width: 560px;
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 16px; overflow: hidden;
+}
+.wizard-header {
+  padding: 24px 28px 20px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface2);
+}
+.wizard-body   { padding: 24px 28px; }
+.wizard-footer {
+  padding: 16px 28px;
+  border-top: 1px solid var(--border);
+  background: var(--surface2);
+  display: flex; align-items: center; justify-content: space-between;
+}
+
+/* ── Step dots ── */
+.step-dots { display: flex; gap: 6px; }
+.step-dot  { width: 8px; height: 8px; border-radius: 50%; background: var(--border2); transition: background 0.2s; }
+.step-dot.on { background: var(--accent); }
+
+/* ── Fade in ── */
+.fade-in { animation: fadeIn 0.25s ease; }
+@keyframes fadeIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
