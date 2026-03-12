@@ -118,6 +118,64 @@ app.get('/api/rss', async (req, res) => {
   } catch(e) { res.status(502).json({ error: e.message }); }
 });
 
+// ── /api/devinfo ─────────────────────────────────────────────────────────────
+// Development health + schema inspection endpoint.
+// Protected by DEVINFO_TOKEN env var (set in Railway dashboard).
+// Usage: /api/devinfo?key=<DEVINFO_TOKEN>
+app.get('/api/devinfo', async (req, res) => {
+  const token = process.env.DEVINFO_TOKEN;
+  if (token && req.query.key !== token) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  try {
+    const pgHeaders = {
+      apikey: SUPA_KEY,
+      Authorization: `Bearer ${SUPA_KEY}`,
+      Accept: 'application/json',
+    };
+    const [tablesRes, columnsRes] = await Promise.all([
+      fetch(`${SUPA_URL}/pg/tables?limit=50`,  { headers: pgHeaders, signal: AbortSignal.timeout(8000) }),
+      fetch(`${SUPA_URL}/pg/columns?limit=200`, { headers: pgHeaders, signal: AbortSignal.timeout(8000) }),
+    ]);
+    const tables  = tablesRes.ok  ? await tablesRes.json()  : { error: `${tablesRes.status}` };
+    const columns = columnsRes.ok ? await columnsRes.json() : { error: `${columnsRes.status}` };
+
+    const publicTables = Array.isArray(tables)
+      ? tables.filter(t => t.schema === 'public').map(t => t.name)
+      : tables;
+
+    const schemaMap = Array.isArray(columns)
+      ? columns
+          .filter(c => c.schema === 'public')
+          .reduce((acc, c) => {
+            if (!acc[c.table]) acc[c.table] = [];
+            acc[c.table].push({ column: c.name, type: c.format, nullable: c.is_nullable });
+            return acc;
+          }, {})
+      : columns;
+
+    res.json({
+      status:  'ok',
+      version: '4.0.0',
+      env: {
+        ANTHROPIC_KEY:  !!process.env.ANTHROPIC_KEY,
+        TINNGO_KEY:     !!process.env.TINNGO_KEY,
+        FRED_KEY:       !!process.env.FRED_KEY,
+        TWELVEDATA_KEY: !!process.env.TWELVEDATA_KEY,
+        SUPA_URL:       !!process.env.SUPA_URL,
+        SUPA_KEY:       !!process.env.SUPA_KEY,
+        SUPA_ANON_KEY:  !!process.env.SUPA_ANON_KEY,
+        NODE_ENV:       process.env.NODE_ENV,
+      },
+      tables: publicTables,
+      schema: schemaMap,
+    });
+  } catch (e) {
+    res.status(502).json({ error: e.message });
+  }
+});
+// ─────────────────────────────────────────────────────────────────────────────
+
 const distPath = join(__dirname, '..', 'dist');
 app.use(express.static(distPath));
 app.get('*', (_req, res) => { res.sendFile(join(distPath, 'index.html')); });
