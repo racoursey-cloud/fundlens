@@ -1,4 +1,4 @@
-/* FundLens v4 — Global Styles */
+/* FundLens v4 â Global Styles */
 @import url('https://fonts.googleapis.com/css2?family=Libre+Baskerville:ital,wght@0,400;0,700;1,400&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap');
 @tailwind base;
 @tailwind components;
@@ -40,7 +40,7 @@ body {
   line-height: 1.6;
 }
 
-/* ── Inputs ── */
+/* ââ Inputs ââ */
 input[type="text"],
 input[type="email"],
 input[type="password"],
@@ -64,7 +64,7 @@ input:focus, textarea:focus, select:focus {
 }
 input::placeholder { color: var(--text3); }
 
-/* ── Buttons ── */
+/* ââ Buttons ââ */
 .btn {
   display: inline-flex; align-items: center; gap: 6px;
   border: none; border-radius: 8px; cursor: pointer;
@@ -80,7 +80,7 @@ input::placeholder { color: var(--text3); }
 .btn-green:hover:not(:disabled)   { filter: brightness(1.1); }
 .btn-sm       { font-size: 12px; padding: 6px 12px; }
 
-/* ── Cards ── */
+/* ââ Cards ââ */
 .card {
   background: var(--surface);
   border: 1px solid var(--border);
@@ -95,7 +95,7 @@ input::placeholder { color: var(--text3); }
 }
 .card-body { padding: 20px; }
 
-/* ── App Header ── */
+/* ââ App Header ââ */
 .app-header {
   position: sticky; top: 0; z-index: 100;
   display: flex; align-items: center; justify-content: space-between;
@@ -111,7 +111,7 @@ input::placeholder { color: var(--text3); }
 }
 .app-logo span { color: var(--accent); }
 
-/* ── Tabs ── */
+/* ââ Tabs ââ */
 .tabs {
   display: flex; gap: 2px; padding: 12px 24px 0;
   border-bottom: 1px solid var(--border);
@@ -124,12 +124,20 @@ input::placeholder { color: var(--text3); }
   font-size: 13px; font-weight: 500;
   padding: 8px 16px 10px;
   border-bottom: 2px solid transparent;
-  transition: all 0.15s; white-space: nowrap;
+  transition: color 0.15s, border-color 0.15s; white-space: nowrap;
+  /* Reserve bold width to prevent layout shift on activation */
+  display: inline-flex; flex-direction: column; align-items: center;
+}
+.tab::after {
+  content: attr(data-label);
+  font-weight: 600;
+  height: 0; visibility: hidden; overflow: hidden;
+  user-select: none; pointer-events: none;
 }
 .tab:hover { color: var(--text2); }
 .tab.on    { color: var(--accent); border-bottom-color: var(--accent); font-weight: 600; }
 
-/* ── Tables ── */
+/* ââ Tables ââ */
 .data-table {
   width: 100%; border-collapse: collapse; font-size: 13px;
 }
@@ -148,7 +156,7 @@ input::placeholder { color: var(--text3); }
 .data-table tbody tr:last-child td { border-bottom: none; }
 .data-table tbody tr:hover td { background: var(--surface2); }
 
-/* ── Score badges ── */
+/* ââ Score badges ââ */
 .score-lg {
   font-family: 'Libre Baskerville', serif;
   font-size: 28px; font-weight: 700; color: var(--text);
@@ -158,19 +166,19 @@ input::placeholder { color: var(--text3); }
   font-size: 15px; font-weight: 600; color: var(--text);
 }
 
-/* ── Source badges ── */
+/* ââ Source badges ââ */
 .src-live    { background: #0d2b22; color: var(--green); border: 1px solid var(--green-bd); border-radius: 5px; font-size: 10px; font-weight: 700; letter-spacing: 0.08em; padding: 3px 7px; }
 .src-seed    { background: var(--surface3); color: var(--text3); border: 1px solid var(--border2); border-radius: 5px; font-size: 10px; font-weight: 700; letter-spacing: 0.08em; padding: 3px 7px; }
 .src-partial { background: var(--amber-bg); color: var(--amber); border: 1px solid var(--amber-bd); border-radius: 5px; font-size: 10px; font-weight: 700; letter-spacing: 0.08em; padding: 3px 7px; }
 
-/* ── Badge ── */
+/* ââ Badge ââ */
 .badge { display: inline-block; border-radius: 5px; font-size: 10px; font-weight: 700; letter-spacing: 0.06em; padding: 2px 7px; }
 
-/* ── Note / label ── */
+/* ââ Note / label ââ */
 .note  { font-size: 11px; color: var(--text3); line-height: 1.5; }
 .label { font-size: 11px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text3); }
 
-/* ── Fund chip ── */
+/* ââ Fund chip ââ */
 .fund-chip {
   display: inline-flex; align-items: center; gap: 6px;
   background: var(--surface3); border: 1px solid var(--border2);
@@ -183,7 +191,7 @@ input::placeholder { color: var(--text3); }
 }
 .fund-chip button:hover { color: var(--red); }
 
-/* ── Spinner ── */
+/* ââ Spinner ââ */
 .spinner {
   display: inline-block;
   width: 18px; height: 18px;
@@ -194,7 +202,7 @@ input::placeholder { color: var(--text3); }
 }
 @keyframes spin { to { transform: rotate(360deg); } }
 
-/* ── Wizard ── */
+/* ââ Wizard ââ */
 .wizard-wrap {
   min-height: 100vh; display: flex; align-items: center; justify-content: center;
   padding: 24px; background: var(--bg);
@@ -217,11 +225,11 @@ input::placeholder { color: var(--text3); }
   display: flex; align-items: center; justify-content: space-between;
 }
 
-/* ── Step dots ── */
+/* ââ Step dots ââ */
 .step-dots { display: flex; gap: 6px; }
 .step-dot  { width: 8px; height: 8px; border-radius: 50%; background: var(--border2); transition: background 0.2s; }
 .step-dot.on { background: var(--accent); }
 
-/* ── Fade in ── */
+/* ââ Fade in ââ */
 .fade-in { animation: fadeIn 0.25s ease; }
 @keyframes fadeIn { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
