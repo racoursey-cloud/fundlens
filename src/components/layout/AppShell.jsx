@@ -4,6 +4,7 @@ import { supabase } from '../../services/supabase.js';
 import { SEED, getTierFromModZ } from '../../engine/constants.js';
 import PipelineOverlay from '../shared/PipelineOverlay.jsx';
 import DataQualityBanner from '../shared/DataQualityBanner.jsx';
+import ThesisTab from '../thesis/ThesisTab.jsx';
 
 const TABS = [
   { id:'rank', label:'Rankings' }, { id:'thesis', label:'Investment Case' },
@@ -53,7 +54,7 @@ export default function AppShell({ userFunds, profile }) {
       <main style={{ padding:'24px', maxWidth:'1200px', margin:'0 auto' }}>
         <DataQualityBanner />
         {activeTab==='rank' && <RankingsPlaceholder funds={displayFunds} source={source} />}
-        {activeTab==='thesis' && <Placeholder icon={'\uD83C\uDF0D'} title="Investment Thesis" msg="Run Analysis to generate your macro thesis and sector outlook." />}
+        {activeTab==='thesis' && <ThesisTab />}
         {activeTab==='portfolio' && <Placeholder icon={'\uD83D\uDCBC'} title="Portfolio Allocation" msg="Run Analysis to build a risk-adjusted allocation." />}
         {activeTab==='holdings' && <Placeholder icon={'\uD83D\uDCC2'} title="Fund Holdings" msg="Run Analysis to load holdings from SEC EDGAR." />}
         {activeTab==='matrix' && <Placeholder icon={'\u26A1'} title="Factor Matrix" msg="Run Analysis to see all 4 factors side by side." />}
