@@ -1,18 +1,18 @@
-// FundLens v4 â Supabase cache helpers
+// FundLens v4 — Supabase cache helpers
 // All Supabase calls route through the Railway /api/supabase proxy so the
 // service_role key (which bypasses RLS) never touches the client.
 // The proxy injects the Authorization header server-side.
 
-// â Low-level REST helpers ââââââââââââââââââââââââââââââââââââââââââââââââ
+// ── Low-level REST helpers ────────────────────────────────────────────────────
 async function supaFetch(path, options = {}) {
-  // Route through proxy â service_role key is injected by server.js.
+  // Route through proxy — service_role key is injected by server.js.
   // Direct Supabase calls with the anon key fail RLS on every shared table.
   const url = `/api/supabase${path}`;
   const res = await fetch(url, {
     ...options,
     headers: {
       'Content-Type': 'application/json',
-      'Prefer': options.prefer ?? '',
+      'Prefer':       options.prefer ?? '',
       ...options.headers,
     },
   });
@@ -24,10 +24,10 @@ async function supaFetch(path, options = {}) {
   return res.json();
 }
 
-// â holdings_cache ââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+// ── holdings_cache ────────────────────────────────────────────────────────────
 // Strategy: DELETE all rows for ticker, then INSERT fresh batch.
-// This is the required pattern â no upsert.
-// TTL: 15 days â N-PORT-P filings are submitted monthly (within 60 days of
+// This is the required pattern — no upsert.
+// TTL: 15 days — N-PORT-P filings are submitted monthly (within 60 days of
 // month-end), so holdings can change monthly. 15 days keeps data fresh
 // without hammering EDGAR on every run.
 export async function getHoldings(ticker) {
@@ -47,16 +47,16 @@ export async function setHoldings(ticker, rows) {
   });
   if (!rows?.length) return;
   // 2. Insert fresh rows
-  const now = new Date().toISOString();
+  const now     = new Date().toISOString();
   const payload = rows.map(r => ({ ...r, fund_ticker: ticker, cached_at: now }));
   return supaFetch('/holdings_cache', {
     method: 'POST',
     prefer: 'resolution=merge-duplicates,return=minimal',
-    body: JSON.stringify(payload),
+    body:   JSON.stringify(payload),
   });
 }
 
-// â sector_mappings âââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+// ── sector_mappings ───────────────────────────────────────────────────────────
 export async function getSectorMapping(ticker) {
   const rows = await supaFetch(
     `/sector_mappings?ticker=eq.${encodeURIComponent(ticker)}&limit=1`
@@ -68,11 +68,11 @@ export async function setSectorMapping(ticker, sector, industry) {
   return supaFetch('/sector_mappings', {
     method: 'POST',
     prefer: 'resolution=merge-duplicates,return=minimal',
-    body: JSON.stringify({ ticker, sector, industry, cached_at: new Date().toISOString() }),
+    body:   JSON.stringify({ ticker, sector, industry, cached_at: new Date().toISOString() }),
   });
 }
 
-// â manager_scores ââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+// ── manager_scores ────────────────────────────────────────────────────────────
 // 30-day cache
 export async function getManagerScore(ticker) {
   const rows = await supaFetch(
@@ -89,11 +89,11 @@ export async function setManagerScore(ticker, score, reasoning, confidence = 'me
   return supaFetch('/manager_scores', {
     method: 'POST',
     prefer: 'resolution=merge-duplicates,return=minimal',
-    body: JSON.stringify({ ticker, score, reasoning, confidence, cached_at: new Date().toISOString() }),
+    body:   JSON.stringify({ ticker, score, reasoning, confidence, cached_at: new Date().toISOString() }),
   });
 }
 
-// â fund_profiles (expense ratios) ââââââââââââââââââââââââââââââââââââââââ
+// ── fund_profiles (expense ratios) ───────────────────────────────────────────
 // 90-day cache
 export async function getFundProfile(ticker) {
   const rows = await supaFetch(
@@ -110,12 +110,34 @@ export async function setFundProfile(ticker, data) {
   return supaFetch('/fund_profiles', {
     method: 'POST',
     prefer: 'resolution=merge-duplicates,return=minimal',
-    body: JSON.stringify({ ticker, ...data, fetched_at: new Date().toISOString() }),
+    body:   JSON.stringify({ ticker, ...data, fetched_at: new Date().toISOString() }),
   });
 }
 
-// â cached_world_data âââââââââââââââââââââââââââââââââââââââââââââââââââââ
-// Single row (id=1), no TTL check here â world.js decides when to refresh.
+// ── tiingo_cache (momentum + sharpe) ─────────────────────────────────────────
+// 1-day cache — price-derived metrics update daily.
+// Stores computed values only, not raw price series.
+export async function getTiingoMetrics(ticker) {
+  const rows = await supaFetch(
+    `/tiingo_cache?ticker=eq.${encodeURIComponent(ticker)}&limit=1`
+  );
+  const row = rows?.[0];
+  if (!row) return null;
+  const age = Date.now() - new Date(row.cached_at).getTime();
+  if (age > 1 * 24 * 60 * 60 * 1000) return null; // expired
+  return row;
+}
+
+export async function setTiingoMetrics(ticker, data) {
+  return supaFetch('/tiingo_cache', {
+    method: 'POST',
+    prefer: 'resolution=merge-duplicates,return=minimal',
+    body:   JSON.stringify({ ticker, ...data, cached_at: new Date().toISOString() }),
+  });
+}
+
+// ── cached_world_data ─────────────────────────────────────────────────────────
+// Single row (id=1), no TTL check here — world.js decides when to refresh.
 // treasury_data stored in its own column (separate from fred_data) because
 // Treasury yields are forward-looking market signals, not lagging FRED stats.
 export async function getWorldData() {
@@ -127,8 +149,8 @@ export async function setWorldData(fredData, headlines, treasuryData = null) {
   return supaFetch('/cached_world_data', {
     method: 'POST',
     prefer: 'resolution=merge-duplicates,return=minimal',
-    body: JSON.stringify({
-      id: 1,
+    body:   JSON.stringify({
+      id:            1,
       fred_data:     fredData,
       headlines,
       treasury_data: treasuryData,
@@ -137,12 +159,12 @@ export async function setWorldData(fredData, headlines, treasuryData = null) {
   });
 }
 
-// â run_history âââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+// ── run_history ───────────────────────────────────────────────────────────────
 export async function saveRunHistory(userId, { dominantTheme, macroStance, fundScores, sectorScores }) {
   return supaFetch('/run_history', {
     method: 'POST',
     prefer: 'return=minimal',
-    body: JSON.stringify({
+    body:   JSON.stringify({
       user_id:        userId,
       ran_at:         new Date().toISOString(),
       dominant_theme: dominantTheme,
@@ -160,7 +182,7 @@ export async function getLastRun(userId) {
   return rows?.[0] ?? null;
 }
 
-// â user_weights ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
+// ── user_weights ──────────────────────────────────────────────────────────────
 export async function getUserWeights(userId) {
   const rows = await supaFetch(
     `/user_weights?user_id=eq.${encodeURIComponent(userId)}&limit=1`
