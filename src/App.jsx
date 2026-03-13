@@ -54,6 +54,10 @@ export default function App() {
       setUser(s?.user ?? null);
       if (s?.user) await loadUserData(s.user.id);
       setAuthLoading(false);
+    }).catch(err => {
+      // Supabase unreachable or auth service down — don't hang forever
+      console.error('getSession failed:', err);
+      setAuthLoading(false);
     });
 
     const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, s) => {
@@ -98,7 +102,7 @@ export default function App() {
         justifyContent:'center', background:'var(--bg)', gap:'16px' }}>
         <div className="app-logo" style={{ fontSize:'22px' }}>Fund<span>Lens</span></div>
         <span className="spinner" style={{ width:24, height:24, borderWidth:3 }} />
-        <p style={{ fontSize:'12px', color:'var(--text3)' }}>{authLoading ? 'Checking sessionâ¦' : 'Loading your profileâ¦'}</p>
+        <p style={{ fontSize:'12px', color:'var(--text3)' }}>{authLoading ? 'Checking session...' : 'Loading your profile...'}</p>
       </div>
     );
   }
