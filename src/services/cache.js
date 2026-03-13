@@ -1,23 +1,19 @@
 // FundLens v4 — Supabase cache helpers
-// All writes go through the Railway /api/supabase proxy so SUPA_KEY never
-// touches the client.  Read-only calls that only need the anon key can use
-// SUPA_ANON_KEY via the same proxy — the proxy forwards the Authorization
-// header from the request body.
+// All Supabase calls route through the Railway /api/supabase proxy so the
+// service_role key (which bypasses RLS) never touches the client.
+// The proxy injects the Authorization header server-side.
 
-const SUPA_URL  = import.meta.env.VITE_SUPA_URL;   // injected at build time
-const ANON_KEY  = import.meta.env.VITE_SUPA_ANON_KEY;
-
-// ── Low-level REST helpers ────────────────────────────────────────────────────
+// — Low-level REST helpers ————————————————————————————————————————————————
 
 async function supaFetch(path, options = {}) {
-  const url = `${SUPA_URL}/rest/v1${path}`;
+  // Route through proxy — service_role key is injected by server.js.
+  // Direct Supabase calls with the anon key fail RLS on every shared table.
+  const url = `/api/supabase${path}`;
   const res = await fetch(url, {
     ...options,
     headers: {
-      apikey:        ANON_KEY,
-      Authorization: `Bearer ${ANON_KEY}`,
       'Content-Type': 'application/json',
-      Prefer:         options.prefer ?? '',
+      'Prefer':       options.prefer ?? '',
       ...options.headers,
     },
   });
@@ -29,12 +25,21 @@ async function supaFetch(path, options = {}) {
   return res.json();
 }
 
-// ── holdings_cache ────────────────────────────────────────────────────────────
+// — holdings_cache ————————————————————————————————————————————————————————
 // Strategy: DELETE all rows for ticker, then INSERT fresh batch.
 // This is the required pattern — no upsert.
+// TTL: 15 days — N-PORT-P filings are submitted monthly (within 60 days of
+// month-end), so holdings can change monthly. 15 days keeps data fresh
+// without hammering EDGAR on every run.
 
 export async function getHoldings(ticker) {
-  return supaFetch(`/holdings_cache?fund_ticker=eq.${encodeURIComponent(ticker)}&order=weight.desc`);
+  const rows = await supaFetch(
+    `/holdings_cache?fund_ticker=eq.${encodeURIComponent(ticker)}&order=weight.desc`
+  );
+  if (!rows?.length) return null;
+  const age = Date.now() - new Date(rows[0].cached_at).getTime();
+  if (age > 15 * 24 * 60 * 60 * 1000) return null;  // expired
+  return rows;
 }
 
 export async function setHoldings(ticker, rows) {
@@ -46,16 +51,16 @@ export async function setHoldings(ticker, rows) {
   if (!rows?.length) return;
 
   // 2. Insert fresh rows
-  const now = new Date().toISOString();
+  const now     = new Date().toISOString();
   const payload = rows.map(r => ({ ...r, fund_ticker: ticker, cached_at: now }));
   return supaFetch('/holdings_cache', {
-    method:  'POST',
-    prefer:  'return=minimal',
-    body:    JSON.stringify(payload),
+    method: 'POST',
+    prefer: 'resolution=merge-duplicates,return=minimal',
+    body:   JSON.stringify(payload),
   });
 }
 
-// ── sector_mappings ───────────────────────────────────────────────────────────
+// — sector_mappings ————————————————————————————————————————————————————————
 
 export async function getSectorMapping(ticker) {
   const rows = await supaFetch(
@@ -66,13 +71,13 @@ export async function getSectorMapping(ticker) {
 
 export async function setSectorMapping(ticker, sector, industry) {
   return supaFetch('/sector_mappings', {
-    method:  'POST',
-    prefer:  'resolution=merge-duplicates,return=minimal',
-    body:    JSON.stringify({ ticker, sector, industry, cached_at: new Date().toISOString() }),
+    method: 'POST',
+    prefer: 'resolution=merge-duplicates,return=minimal',
+    body:   JSON.stringify({ ticker, sector, industry, cached_at: new Date().toISOString() }),
   });
 }
 
-// ── manager_scores ────────────────────────────────────────────────────────────
+// — manager_scores ————————————————————————————————————————————————————————
 // 30-day cache
 
 export async function getManagerScore(ticker) {
@@ -88,13 +93,13 @@ export async function getManagerScore(ticker) {
 
 export async function setManagerScore(ticker, score, reasoning) {
   return supaFetch('/manager_scores', {
-    method:  'POST',
-    prefer:  'resolution=merge-duplicates,return=minimal',
-    body:    JSON.stringify({ ticker, score, reasoning, cached_at: new Date().toISOString() }),
+    method: 'POST',
+    prefer: 'resolution=merge-duplicates,return=minimal',
+    body:   JSON.stringify({ ticker, score, reasoning, cached_at: new Date().toISOString() }),
   });
 }
 
-// ── fund_profiles (expense ratios) ───────────────────────────────────────────
+// — fund_profiles (expense ratios) ————————————————————————————————————————
 // 90-day cache
 
 export async function getFundProfile(ticker) {
@@ -110,13 +115,13 @@ export async function getFundProfile(ticker) {
 
 export async function setFundProfile(ticker, data) {
   return supaFetch('/fund_profiles', {
-    method:  'POST',
-    prefer:  'resolution=merge-duplicates,return=minimal',
-    body:    JSON.stringify({ ticker, ...data, fetched_at: new Date().toISOString() }),
+    method: 'POST',
+    prefer: 'resolution=merge-duplicates,return=minimal',
+    body:   JSON.stringify({ ticker, ...data, fetched_at: new Date().toISOString() }),
   });
 }
 
-// ── cached_world_data ─────────────────────────────────────────────────────────
+// — cached_world_data ————————————————————————————————————————————————————
 // Single row (id=1), no TTL check here — pipeline decides when to refresh.
 
 export async function getWorldData() {
@@ -126,9 +131,9 @@ export async function getWorldData() {
 
 export async function setWorldData(fredData, headlines) {
   return supaFetch('/cached_world_data', {
-    method:  'POST',
-    prefer:  'resolution=merge-duplicates,return=minimal',
-    body:    JSON.stringify({
+    method: 'POST',
+    prefer: 'resolution=merge-duplicates,return=minimal',
+    body:   JSON.stringify({
       id:         1,
       fred_data:  fredData,
       headlines,
@@ -137,19 +142,19 @@ export async function setWorldData(fredData, headlines) {
   });
 }
 
-// ── run_history ───────────────────────────────────────────────────────────────
+// — run_history ——————————————————————————————————————————————————————————
 
 export async function saveRunHistory(userId, { dominantTheme, macroStance, fundScores, sectorScores }) {
   return supaFetch('/run_history', {
-    method:  'POST',
-    prefer:  'return=minimal',
-    body:    JSON.stringify({
-      user_id:        userId,
-      ran_at:         new Date().toISOString(),
+    method: 'POST',
+    prefer: 'return=minimal',
+    body:   JSON.stringify({
+      user_id:       userId,
+      ran_at:        new Date().toISOString(),
       dominant_theme: dominantTheme,
-      macro_stance:   macroStance,
-      fund_scores:    fundScores,
-      sector_scores:  sectorScores,
+      macro_stance:  macroStance,
+      fund_scores:   fundScores,
+      sector_scores: sectorScores,
     }),
   });
 }
@@ -161,7 +166,7 @@ export async function getLastRun(userId) {
   return rows?.[0] ?? null;
 }
 
-// ── user_weights ──────────────────────────────────────────────────────────────
+// — user_weights ——————————————————————————————————————————————————————————
 
 export async function getUserWeights(userId) {
   const rows = await supaFetch(

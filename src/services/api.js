@@ -4,7 +4,7 @@
 
 const BASE = '';  // Same origin — Railway serves both static files and the proxy
 
-// ── Core fetch wrapper ────────────────────────────────────────────────────────
+// — Core fetch wrapper ————————————————————————————————————————————————————
 
 async function apiFetch(path, options = {}, retries = 1) {
   const timeout = options.timeout ?? 30000;
@@ -46,24 +46,23 @@ async function apiText(path, options = {}, retries = 1) {
   return res.text();
 }
 
-// ── Claude ────────────────────────────────────────────────────────────────────
+// — Claude ————————————————————————————————————————————————————————————————
 
 export async function callClaude({ system, user, maxTokens = 1024, json = false }) {
   const messages = [{ role: 'user', content: user }];
-  const body = {
-    model:      'claude-haiku-4-5-20251001',
-    max_tokens: maxTokens,
-    messages,
-  };
+  const body = { messages, max_tokens: maxTokens };
   if (system) body.system = system;
 
-  const data = await apiJSON('/api/claude', { method: 'POST', body }, 2);
+  const res = await apiFetch('/api/claude', {
+    method: 'POST',
+    body,
+  });
+  const data = await res.json();
+  const text = (data.content || []).map(b => b.text || '').join('').trim();
 
-  const text = data?.content?.[0]?.text ?? '';
   if (!json) return text;
 
-  // Strip markdown fences if present, then parse JSON
-  const clean = text.replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/i, '').trim();
+  const clean = text.replace(/```json|```/g, '').trim();
   try {
     return JSON.parse(clean);
   } catch {
@@ -71,29 +70,32 @@ export async function callClaude({ system, user, maxTokens = 1024, json = false 
   }
 }
 
-// ── Tiingo ────────────────────────────────────────────────────────────────────
+// — Tiingo ————————————————————————————————————————————————————————————————
 
 export async function fetchTiingo(path, params = {}) {
-  const qs = new URLSearchParams(params).toString();
+  const qs  = new URLSearchParams(params).toString();
   const url = `/api/tiingo${path}${qs ? '?' + qs : ''}`;
   return apiJSON(url, {}, 2);
 }
 
-// ── FRED (sequential — NOT parallel, per architecture rules) ──────────────────
+// — FRED (sequential — NOT parallel, per architecture rules) ——————————————
 
 export async function fetchFredSeries(seriesId) {
-  const url = `/api/fred/series/observations?series_id=${seriesId}&sort_order=desc&limit=2`;
+  // limit=5 gives 4 fallback observations for series with recent missing (.) values.
+  // Monthly series (CPIAUCSL, UNRATE, INDPRO, UMCSENT) often have 1–3 consecutive
+  // missing observations during the reporting lag period. limit=2 was insufficient.
+  const url = `/api/fred/series/observations?series_id=${seriesId}&sort_order=desc&limit=5`;
   return apiJSON(url, {}, 2);
 }
 
-// ── GDELT ─────────────────────────────────────────────────────────────────────
+// — GDELT ————————————————————————————————————————————————————————————————
 
 export async function fetchGdelt(params = {}) {
   const qs = new URLSearchParams(params).toString();
   return apiJSON(`/api/gdelt${qs ? '?' + qs : ''}`, {}, 1);
 }
 
-// ── SEC EDGAR ─────────────────────────────────────────────────────────────────
+// — SEC EDGAR ————————————————————————————————————————————————————————————
 
 export async function fetchEdgar(path) {
   return apiJSON(`/api/edgar${path}`, {}, 2);
@@ -108,20 +110,20 @@ export async function fetchSEC(path) {
   return apiText(`/api/www4sec${path}`, {}, 2);
 }
 
-// ── Treasury ──────────────────────────────────────────────────────────────────
+// — Treasury ————————————————————————————————————————————————————————————
 
 export async function fetchTreasury() {
   return apiJSON('/api/treasury', {}, 2);
 }
 
-// ── RSS ───────────────────────────────────────────────────────────────────────
+// — RSS ——————————————————————————————————————————————————————————————————
 
 export async function fetchRSS(feedUrl) {
   const qs = new URLSearchParams({ url: feedUrl }).toString();
   return apiText(`/api/rss?${qs}`, {}, 1);
 }
 
-// ── Twelve Data ───────────────────────────────────────────────────────────────
+// — Twelve Data ——————————————————————————————————————————————————————————
 
 export async function fetchTwelveData(path, params = {}) {
   const qs = new URLSearchParams(params).toString();
