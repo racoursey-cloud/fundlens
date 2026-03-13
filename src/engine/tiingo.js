@@ -1,116 +1,160 @@
-import { GICS_SECTORS } from './constants.js';
+// FundLens v4 — Tiingo price metrics engine
+// Fetches 63 trading days of adjusted close prices for a fund and computes:
+//   - momentum:  63-day total return (price_today / price_63d_ago) - 1
+//   - sharpe:    annualised Sharpe ratio over the 63-day window
+//
+// Architecture notes:
+// - 63 trading days ≈ 3 calendar months. Standard intermediate momentum window.
+// - Sharpe uses the daily Fed Funds Rate (DFF from FRED) as the risk-free rate.
+//   Pass riskFreeRateAnnual from worldData.fredData.DFF.value; defaults to 0.
+// - Cache TTL: 1 day (tiingo_cache table). Price metrics update daily.
+// - MONEY_MARKET_FUNDS return a zero-score sentinel — no price fetch needed.
+// - Never throws. Returns null metrics on any failure; scoring.js handles nulls.
 
-// Module-level in-memory cache — lives for the duration of the page session.
-let tiingoCache  = {};   // { [ticker]: { data, cachedAt } }
-let _marketOpen  = false;
-let _tiingoStale = false; // true when X-Tiingo-Cache: STALE received
+import { MONEY_MARKET_FUNDS } from './constants.js';
+import { getTiingoMetrics, setTiingoMetrics } from '../services/cache.js';
+import { fetchTiingo } from '../services/api.js';
 
-// ── Market helpers ────────────────────────────────────────────────────────────
+const MOMENTUM_DAYS   = 63;   // Trading days for momentum + Sharpe window
+const TRADING_DAYS_PA = 252;  // Trading days per year for annualisation
 
-export function checkMarketOpen() {
-  const now = new Date();
-  const et  = new Date(now.toLocaleString('en-US', { timeZone: 'America/New_York' }));
-  const day = et.getDay();
-  const h   = et.getHours() + et.getMinutes() / 60;
-  _marketOpen = (day >= 1 && day <= 5 && h >= 9.5 && h < 16);
-  return _marketOpen;
+// ── Math helpers ──────────────────────────────────────────────────────────────
+function mean(arr) {
+  return arr.reduce((a, b) => a + b, 0) / arr.length;
 }
 
-export function isMarketOpen()  { return _marketOpen;  }
-export function isTiingoStale() { return _tiingoStale; }
+function stdDev(arr) {
+  const m   = mean(arr);
+  const variance = arr.reduce((sum, x) => sum + (x - m) ** 2, 0) / arr.length;
+  return Math.sqrt(variance);
+}
 
-// ── Core fetch ────────────────────────────────────────────────────────────────
+// ── Compute metrics from price array ─────────────────────────────────────────
+// prices: array of adjusted close prices, oldest first, length >= 2
+// riskFreeRateAnnual: annualised risk-free rate as decimal (e.g. 0.0533 for 5.33%)
+function computeMetrics(prices, riskFreeRateAnnual = 0) {
+  if (!prices || prices.length < 2) return null;
 
-export async function fetchTiingo(ticker) {
-  // Serve from in-memory cache when market is closed and we already have data.
-  if (!_marketOpen && tiingoCache[ticker]) {
-    return tiingoCache[ticker].data;
-  }
+  // Momentum: total return over the full window
+  const momentum = (prices[prices.length - 1] / prices[0]) - 1;
 
-  // ~95 calendar days ensures >=63 trading days of price history.
-  const end   = new Date();
-  const start = new Date(end);
-  start.setDate(start.getDate() - 95);
-  const fmt = d => d.toISOString().slice(0, 10);
-
-  const url = '/api/tiingo/tiingo/daily/' + ticker + '/prices'
-    + '?startDate=' + fmt(start) + '&endDate=' + fmt(end);
-
-  let res;
-  try {
-    res = await fetch(url);
-  } catch (err) {
-    if (tiingoCache[ticker]) return tiingoCache[ticker].data;
-    throw err;
-  }
-
-  if (res.status === 429) {
-    if (tiingoCache[ticker]) return tiingoCache[ticker].data;
-    throw new Error('Tiingo 429 for ' + ticker + ' and no cache available');
-  }
-
-  if (res.headers?.get('X-Tiingo-Cache') === 'STALE') {
-    _tiingoStale = true;
-  }
-
-  if (!res.ok) {
-    if (tiingoCache[ticker]) return tiingoCache[ticker].data;
-    throw new Error('Tiingo ' + res.status + ' for ' + ticker);
-  }
-
-  const raw    = await res.json();
-  const prices = raw.map(d => d.adjClose || d.close).filter(Boolean);
-
-  if (prices.length < 20) {
-    throw new Error('Tiingo: insufficient data for ' + ticker + ' (' + prices.length + ' points)');
-  }
-
-  const latest = prices[prices.length - 1];
-  const p63    = prices[Math.max(0, prices.length - 64)];
-  const p21    = prices[Math.max(0, prices.length - 22)];
-
-  const mom63    = ((latest - p63) / p63) * 100;
-  const mom21    = ((latest - p21) / p21) * 100;
-  const momentum = Math.min(10, Math.max(0, 5 + mom63 * 0.35 + mom21 * 0.15));
-
-  // Annualised Sharpe, risk-free rate 4.3%
-  const rets = [];
+  // Daily returns
+  const dailyReturns = [];
   for (let i = 1; i < prices.length; i++) {
-    rets.push((prices[i] - prices[i - 1]) / prices[i - 1]);
+    dailyReturns.push((prices[i] / prices[i - 1]) - 1);
   }
-  const mean     = rets.reduce((s, r) => s + r, 0) / rets.length * 252;
-  const variance = rets.reduce((s, r) => s + Math.pow(r - mean / 252, 2), 0) / rets.length;
-  const std      = Math.sqrt(variance) * Math.sqrt(252);
-  const sharpe   = std > 0 ? (mean - 0.043) / std : 0;
-  const riskAdj  = Math.min(10, Math.max(0, 5 + sharpe * 1.8));
 
-  const result = {
-    momentum: +momentum.toFixed(2),
-    riskAdj:  +riskAdj.toFixed(2),
-    nav:      latest,
-    mom63:    +mom63.toFixed(2),
-    mom21:    +mom21.toFixed(2),
+  // Convert annual risk-free rate to daily equivalent
+  const riskFreeDaily = riskFreeRateAnnual / TRADING_DAYS_PA;
+
+  // Excess daily returns
+  const excessReturns = dailyReturns.map(r => r - riskFreeDaily);
+
+  const meanExcess = mean(excessReturns);
+  const stdExcess  = stdDev(excessReturns);
+
+  // Annualised Sharpe — guard against zero std dev (flat price series)
+  const sharpe = stdExcess > 0
+    ? (meanExcess / stdExcess) * Math.sqrt(TRADING_DAYS_PA)
+    : 0;
+
+  return {
+    momentum: Math.round(momentum * 10000) / 10000,  // 4 decimal places
+    sharpe:   Math.round(sharpe   * 1000)  / 1000,   // 3 decimal places
   };
-
-  tiingoCache[ticker] = { data: result, cachedAt: Date.now() };
-  return result;
 }
 
-// ── Sector momentum — all 11 GICS ETFs concurrently ──────────────────────────
+// ── Tiingo price fetch ────────────────────────────────────────────────────────
+// Fetches MOMENTUM_DAYS + 5 calendar days of daily adjusted prices to ensure
+// we get at least MOMENTUM_DAYS trading day observations even around holidays.
+async function fetchPrices(ticker) {
+  // Request ~95 calendar days to guarantee 63+ trading day observations
+  const endDate   = new Date();
+  const startDate = new Date();
+  startDate.setDate(endDate.getDate() - 95);
 
-export async function fetchSectorMomentum() {
-  const FALLBACK = { momentum: 5, mom63: 0, mom21: 0, riskAdj: 5 };
+  const fmt  = d => d.toISOString().split('T')[0];
 
-  const results = await Promise.all(
-    Object.entries(GICS_SECTORS).map(async ([sector, { etf }]) => {
-      try {
-        const data = await fetchTiingo(etf);
-        return [sector, data];
-      } catch (_) {
-        return [sector, { ...FALLBACK }];
+  try {
+    const data = await fetchTiingo(
+      `/daily/${encodeURIComponent(ticker)}/prices`,
+      {
+        startDate:   fmt(startDate),
+        endDate:     fmt(endDate),
+        resampleFreq: 'daily',
+        sort:         'date',
       }
-    })
-  );
+    );
 
-  return Object.fromEntries(results);
+    if (!Array.isArray(data) || data.length < 2) {
+      console.warn(`[tiingo] Insufficient price data for ${ticker} (${data?.length ?? 0} rows)`);
+      return null;
+    }
+
+    // Extract adjusted close prices, oldest first
+    // Tiingo field: adjClose (preferred) or close
+    const prices = data
+      .map(d => d.adjClose ?? d.close)
+      .filter(p => p != null && p > 0);
+
+    if (prices.length < 2) return null;
+
+    // Trim to exactly MOMENTUM_DAYS + 1 points (need +1 for MOMENTUM_DAYS returns)
+    return prices.slice(-( MOMENTUM_DAYS + 1));
+  } catch (err) {
+    console.warn(`[tiingo] Price fetch failed for ${ticker}:`, err.message);
+    return null;
+  }
+}
+
+// ── Public entry point ────────────────────────────────────────────────────────
+// Returns:
+// {
+//   momentum:  number | null,   ← 63-day total return, e.g. 0.0842 = +8.42%
+//   sharpe:    number | null,   ← annualised Sharpe ratio
+//   fromCache: boolean,
+// }
+//
+// Money market funds return { momentum: 0, sharpe: 0, fromCache: false }.
+// Returns { momentum: null, sharpe: null, fromCache: false } on any failure.
+export async function fetchTiingoMetrics(ticker, riskFreeRateAnnual = 0) {
+  // Money market funds: stable NAV, no meaningful momentum or Sharpe
+  if (MONEY_MARKET_FUNDS.has(ticker)) {
+    return { momentum: 0, sharpe: 0, fromCache: false };
+  }
+
+  // Check Supabase cache (1-day TTL enforced by getTiingoMetrics)
+  try {
+    const cached = await getTiingoMetrics(ticker);
+    if (cached) {
+      return {
+        momentum:  cached.momentum  ?? null,
+        sharpe:    cached.sharpe    ?? null,
+        fromCache: true,
+      };
+    }
+  } catch (err) {
+    console.warn(`[tiingo] Cache read failed for ${ticker}:`, err.message);
+  }
+
+  // Fetch prices and compute
+  const prices  = await fetchPrices(ticker);
+  const metrics = computeMetrics(prices, riskFreeRateAnnual);
+
+  if (!metrics) {
+    return { momentum: null, sharpe: null, fromCache: false };
+  }
+
+  // Persist to Supabase
+  try {
+    await setTiingoMetrics(ticker, {
+      momentum: metrics.momentum,
+      sharpe:   metrics.sharpe,
+    });
+  } catch (err) {
+    console.warn(`[tiingo] Cache write failed for ${ticker}:`, err.message);
+    // Non-fatal
+  }
+
+  return { ...metrics, fromCache: false };
 }
