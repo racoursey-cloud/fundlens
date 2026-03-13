@@ -38,10 +38,16 @@ export const GICS_SECTORS = {
 };
 
 export const FRED_SERIES = {
-  DFF: 'Fed Funds Rate', T10Y2Y: '10Y-2Y Yield Curve', CPIAUCSL: 'CPI YoY',
-  UNRATE: 'Unemployment Rate', BAMLH0A0HYM2: 'HY Credit Spread',
-  DCOILWTICO: 'WTI Crude Oil (daily)', INDPRO: 'Industrial Production',
-  UMCSENT: 'Consumer Sentiment', T10YIE: 'Breakeven Inflation 10Y', DTWEXBGS: 'USD Broad Index',
+  DFF:          'Fed Funds Rate',
+  T10Y2Y:       '10Y-2Y Yield Curve',
+  CPIAUCSL:     'CPI YoY',
+  UNRATE:       'Unemployment Rate',
+  BAMLH0A0HYM2: 'HY Credit Spread',
+  DCOILWTICO:   'WTI Crude Oil (daily)',
+  INDPRO:       'Industrial Production',
+  UMCSENT:      'Consumer Sentiment',
+  T10YIE:       'Breakeven Inflation 10Y',
+  DTWEXBGS:     'USD Broad Index',
 };
 
 export const MONEY_MARKET_FUNDS = new Set(['FDRXX', 'ADAXX']);
@@ -52,39 +58,53 @@ export const COMPANY_CODES = {
 
 // Phase 2: per-fund alert text displayed in Rankings tab
 export const ALERTS = {
-  PRPFX: 'Single-manager risk (Cuggino)', QFVRX: 'Fee waiver expires 7/31/2026',
-  RNWGX: 'Benchmark changed 1/1/2026', VWIGX: 'Beta 1.34; Baillie Gifford modifying',
-  WFPRX: '2025 underperformed benchmark 4.82pp', OIBIX: 'New manager Block added 2025',
-  MADFX: 'AUM ~$55M viability concern', TGEPX: 'Expense cap expired Feb 2026',
-  VADFX: 'Process downgraded Jul 2024', BPLBX: 'New lead PM; 227% turnover',
-  RTRIX: 'Founder Royce transitioning out', DRRYX: 'PM overhaul - Morningstar Under Review',
-  MWTSX: 'Leadership transition Nov 2025', CFSTX: 'AUM $29.4M viability risk',
-  ADAXX: 'Closed to new investors May 2020', BGHIX: 'Lead PM departed Jul 2025',
-  WEGRX: 'Fee waiver expires 8/31/2026', HRAUX: '12% cap gain distribution early 2026',
+  PRPFX: 'Single-manager risk (Cuggino)',
+  QFVRX: 'Fee waiver expires 7/31/2026',
+  RNWGX: 'Benchmark changed 1/1/2026',
+  VWIGX: 'Beta 1.34; Baillie Gifford modifying',
+  WFPRX: '2025 underperformed benchmark 4.82pp',
+  OIBIX: 'New manager Block added 2025',
+  MADFX: 'AUM ~$55M viability concern',
+  TGEPX: 'Expense cap expired Feb 2026',
+  VADFX: 'Process downgraded Jul 2024',
+  BPLBX: 'New lead PM; 227% turnover',
+  RTRIX: 'Founder Royce transitioning out',
+  DRRYX: 'PM overhaul - Morningstar Under Review',
+  MWTSX: 'Leadership transition Nov 2025',
+  CFSTX: 'AUM $29.4M viability risk',
+  ADAXX: 'Closed to new investors May 2020',
+  BGHIX: 'Lead PM departed Jul 2025',
+  WEGRX: 'Fee waiver expires 8/31/2026',
+  HRAUX: '12% cap gain distribution early 2026',
 };
 
 export const SEED = {
-  PRPFX:{composite:7.8},WFPRX:{composite:6.1},VFWAX:{composite:7.2},QFVRX:{composite:6.4},
-  MADFX:{composite:5.5},VADFX:{composite:4.8},RNWGX:{composite:6.8},OIBIX:{composite:5.2},
-  RTRIX:{composite:4.1},DRRYX:{composite:3.8},VWIGX:{composite:6.5},TGEPX:{composite:5.8},
-  BPLBX:{composite:5.0},CFSTX:{composite:4.5},MWTSX:{composite:4.2},FXAIX:{composite:4.5},
-  FDRXX:{composite:3.5},ADAXX:{composite:3.4},WEGRX:{composite:3.2},BGHIX:{composite:3.5},
-  HRAUX:{composite:3.0},FSPGX:{composite:3.8},
+  PRPFX: { composite: 7.8 }, WFPRX: { composite: 6.1 },
+  VFWAX: { composite: 7.2 }, QFVRX: { composite: 6.4 },
+  MADFX: { composite: 5.5 }, VADFX: { composite: 4.8 },
+  RNWGX: { composite: 6.8 }, OIBIX: { composite: 5.2 },
+  RTRIX: { composite: 4.1 }, DRRYX: { composite: 3.8 },
+  VWIGX: { composite: 6.5 }, TGEPX: { composite: 5.8 },
+  BPLBX: { composite: 5.0 }, CFSTX: { composite: 4.5 },
+  MWTSX: { composite: 4.2 }, FXAIX: { composite: 4.5 },
+  FDRXX: { composite: 3.5 }, ADAXX: { composite: 3.4 },
+  WEGRX: { composite: 3.2 }, BGHIX: { composite: 3.5 },
+  HRAUX: { composite: 3.0 }, FSPGX: { composite: 3.8 },
 };
 
-export const DEFAULT_WEIGHTS = { mandateScore:40, momentum:25, riskAdj:20, managerQuality:15 };
+export const DEFAULT_WEIGHTS = { mandateScore: 40, momentum: 25, riskAdj: 20, managerQuality: 15 };
 
 export const FACTOR_LABELS = {
-  mandateScore:   { label:'Macro Fit',   desc:"How well this fund's investment mandate aligns with current macro conditions" },
-  momentum:       { label:'Market Feel', desc:"Recent price trend (63-day momentum) â the market's current vote on this fund" },
-  riskAdj:        { label:'Room to Run', desc:'Return quality relative to risk (Sharpe ratio)' },
-  managerQuality: { label:'Foundations', desc:'Management team quality, fund stability, parent company reputation, and fee structure' },
+  mandateScore:   { label: 'Macro Fit',    desc: "How well this fund's investment mandate aligns with current macro conditions" },
+  momentum:       { label: 'Market Feel',  desc: 'Recent price trend (63-day momentum) — the market\'s current vote on this fund' },
+  riskAdj:        { label: 'Room to Run',  desc: 'Return quality relative to risk (Sharpe ratio)' },
+  managerQuality: { label: 'Foundations',  desc: 'Management team quality, fund stability, parent company reputation, and fee structure' },
 };
 
 export const WIZARD_STEPS = {
-  titles: ['','Your Investor Profile','Your Fund Universe','What Matters to You','Ready to Go!'],
+  titles: ['', 'Your Investor Profile', 'Your Fund Universe', 'What Matters to You', 'Ready to Go!'],
   subs: ['',
-    'Tell us your name and â if your employer has a FundLens code â enter it to instantly load your 401K fund options.',
+    'Tell us your name and — if your employer has a FundLens code — enter it to instantly load your 401K fund options.',
     'Review the funds available in your 401K. You can add or remove tickers at any time.',
     'These four factors drive how FundLens ranks your funds. Adjust them to reflect what you personally believe matters most.',
     'FundLens will analyze the world right now and surface the funds built for this moment.',
@@ -92,19 +112,31 @@ export const WIZARD_STEPS = {
 };
 
 export const WIZARD_FACTORS = [
-  { key:'mandateScore', label:'Macro Fit', emoji:'ð', what:"How well does this fund's strategy match what's happening in the economy right now?", conservative:"Matters somewhat â you want funds that aren't fighting the macro tide.", aggressive:"Matters a lot â you're betting on the macro call being right." },
-  { key:'momentum', label:'Market Feel', emoji:'ð', what:'Is this fund already moving in the right direction? Recent 63-day price trend.', conservative:"Matters less â past movement doesn't guarantee safety.", aggressive:"Matters a lot â you want funds the market is already rewarding." },
-  { key:'riskAdj', label:'Room to Run', emoji:'âï¸', what:'Does this fund deliver returns without wild swings? (Sharpe ratio)', conservative:'Matters most â you want steady returns, not a rollercoaster.', aggressive:"Matters less â you're willing to accept volatility for bigger gains." },
-  { key:'managerQuality', label:'Foundations', emoji:'ðï¸', what:"How consistently has this fund's management team executed over time?", conservative:"Matters more â you want a fund you can trust to do what it says.", aggressive:"Matters as a floor â you still don't want a badly run fund." },
+  { key: 'mandateScore', label: 'Macro Fit', emoji: '🌍',
+    what: "How well does this fund's strategy match what's happening in the economy right now?",
+    conservative: "Matters somewhat — you want funds that aren't fighting the macro tide.",
+    aggressive: "Matters a lot — you're betting on the macro call being right." },
+  { key: 'momentum', label: 'Market Feel', emoji: '📈',
+    what: 'Is this fund already moving in the right direction? Recent 63-day price trend.',
+    conservative: "Matters less — past movement doesn't guarantee safety.",
+    aggressive: 'Matters a lot — you want funds the market is already rewarding.' },
+  { key: 'riskAdj', label: 'Room to Run', emoji: '⚖️',
+    what: 'Does this fund deliver returns without wild swings? (Sharpe ratio — return per unit of risk)',
+    conservative: 'Matters most — you want steady returns, not a rollercoaster.',
+    aggressive: "Matters less — you're willing to accept volatility for bigger gains." },
+  { key: 'managerQuality', label: 'Foundations', emoji: '🏛️',
+    what: "How consistently has this fund's management team executed over time?",
+    conservative: "Matters more — you want a fund you can trust to do what it says.",
+    aggressive: "Matters as a floor — you still don't want a badly run fund." },
 ];
 
 export const DEFAULT_WORLD_TTL_MINS = 60;
 
 export const RSS_FEEDS = [
-  { url:'https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=10000664', label:'CNBC Markets' },
-  { url:'https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=20910258', label:'CNBC Economy' },
-  { url:'https://feeds.content.dowjones.io/public/rss/mw_topstories', label:'MarketWatch' },
-  { url:'https://feeds.content.dowjones.io/public/rss/mw_marketpulse', label:'MarketWatch Pulse' },
+  { url: 'https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=10000664', label: 'CNBC Markets' },
+  { url: 'https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=20910258', label: 'CNBC Economy' },
+  { url: 'https://feeds.content.dowjones.io/public/rss/mw_topstories',                          label: 'MarketWatch' },
+  { url: 'https://feeds.content.dowjones.io/public/rss/mw_marketpulse',                         label: 'MarketWatch Pulse' },
 ];
 
 export function getTierFromModZ(modZ) {
@@ -114,3 +146,7 @@ export function getTierFromModZ(modZ) {
   if (modZ >= -0.5) return 'NEUTRAL';
   return 'WEAK';
 }
+
+// Single source of truth for the Claude model used across all engine files.
+// Update here when the model changes — do not hardcode in individual files.
+export const CLAUDE_MODEL = 'claude-haiku-4-5-20251001';
