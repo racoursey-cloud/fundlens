@@ -1,11 +1,11 @@
-// FundLens v4 — Supabase cache helpers
+// FundLens v4 â Supabase cache helpers
 // All Supabase calls route through the Railway /api/supabase proxy so the
 // service_role key (which bypasses RLS) never touches the client.
 // The proxy injects the Authorization header server-side.
 
-// — Low-level REST helpers ————————————————————————————————————————————————
+// â Low-level REST helpers ââââââââââââââââââââââââââââââââââââââââââââââââ
 async function supaFetch(path, options = {}) {
-  // Route through proxy — service_role key is injected by server.js.
+  // Route through proxy â service_role key is injected by server.js.
   // Direct Supabase calls with the anon key fail RLS on every shared table.
   const url = `/api/supabase${path}`;
   const res = await fetch(url, {
@@ -24,10 +24,10 @@ async function supaFetch(path, options = {}) {
   return res.json();
 }
 
-// — holdings_cache ————————————————————————————————————————————————————————
+// â holdings_cache ââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
 // Strategy: DELETE all rows for ticker, then INSERT fresh batch.
-// This is the required pattern — no upsert.
-// TTL: 15 days — N-PORT-P filings are submitted monthly (within 60 days of
+// This is the required pattern â no upsert.
+// TTL: 15 days â N-PORT-P filings are submitted monthly (within 60 days of
 // month-end), so holdings can change monthly. 15 days keeps data fresh
 // without hammering EDGAR on every run.
 export async function getHoldings(ticker) {
@@ -56,7 +56,7 @@ export async function setHoldings(ticker, rows) {
   });
 }
 
-// — sector_mappings ———————————————————————————————————————————————————————
+// â sector_mappings âââââââââââââââââââââââââââââââââââââââââââââââââââââââ
 export async function getSectorMapping(ticker) {
   const rows = await supaFetch(
     `/sector_mappings?ticker=eq.${encodeURIComponent(ticker)}&limit=1`
@@ -72,7 +72,7 @@ export async function setSectorMapping(ticker, sector, industry) {
   });
 }
 
-// — manager_scores ————————————————————————————————————————————————————————
+// â manager_scores ââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
 // 30-day cache
 export async function getManagerScore(ticker) {
   const rows = await supaFetch(
@@ -85,15 +85,15 @@ export async function getManagerScore(ticker) {
   return row;
 }
 
-export async function setManagerScore(ticker, score, reasoning) {
+export async function setManagerScore(ticker, score, reasoning, confidence = 'medium') {
   return supaFetch('/manager_scores', {
     method: 'POST',
     prefer: 'resolution=merge-duplicates,return=minimal',
-    body: JSON.stringify({ ticker, score, reasoning, cached_at: new Date().toISOString() }),
+    body: JSON.stringify({ ticker, score, reasoning, confidence, cached_at: new Date().toISOString() }),
   });
 }
 
-// — fund_profiles (expense ratios) ————————————————————————————————————————
+// â fund_profiles (expense ratios) ââââââââââââââââââââââââââââââââââââââââ
 // 90-day cache
 export async function getFundProfile(ticker) {
   const rows = await supaFetch(
@@ -114,8 +114,8 @@ export async function setFundProfile(ticker, data) {
   });
 }
 
-// — cached_world_data —————————————————————————————————————————————————————
-// Single row (id=1), no TTL check here — world.js decides when to refresh.
+// â cached_world_data âââââââââââââââââââââââââââââââââââââââââââââââââââââ
+// Single row (id=1), no TTL check here â world.js decides when to refresh.
 // treasury_data stored in its own column (separate from fred_data) because
 // Treasury yields are forward-looking market signals, not lagging FRED stats.
 export async function getWorldData() {
@@ -137,7 +137,7 @@ export async function setWorldData(fredData, headlines, treasuryData = null) {
   });
 }
 
-// — run_history ———————————————————————————————————————————————————————————
+// â run_history âââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
 export async function saveRunHistory(userId, { dominantTheme, macroStance, fundScores, sectorScores }) {
   return supaFetch('/run_history', {
     method: 'POST',
@@ -160,7 +160,7 @@ export async function getLastRun(userId) {
   return rows?.[0] ?? null;
 }
 
-// — user_weights ——————————————————————————————————————————————————————————
+// â user_weights ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
 export async function getUserWeights(userId) {
   const rows = await supaFetch(
     `/user_weights?user_id=eq.${encodeURIComponent(userId)}&limit=1`
