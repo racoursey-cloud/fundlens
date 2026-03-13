@@ -1,229 +1,230 @@
-// FundLens v4 — Expense ratio fetcher
-// Fetches gross/net expense ratios for each fund via Claude's training knowledge.
-// No web_search — explicitly prohibited by architecture constraints.
-// 90-day Supabase cache — expense ratios change slowly (quarterly at most).
+// FundLens v4 — Expense ratio engine
+// Fetches gross/net expense ratio for a fund via Claude, classifies fund type
+// from EDGAR holdings data, and returns a ±0.5 net-value modifier for use
+// in scoring.js after the weighted composite sum.
 //
 // Architecture notes:
-// - Fund type is derived PROGRAMMATICALLY from EDGAR holdings assetCat distribution
-//   and fund name patterns — Claude is NOT asked to classify fund type.
-//   This keeps classification deterministic and auditable.
-// - Claude is only asked for the expense ratio numbers and confidence level.
-// - EXPENSE_THRESHOLDS is exported so scoring.js can apply the net-value
-//   modifier (±0.5 points on composite score) without reimporting this file.
-// - Thresholds are anchored to ICI/Morningstar 2024 published data for
-//   401(k) plan participants — NOT generic industry averages.
-//   Sources: ICI "Economics of Providing 401(k) Plans 2024" (July 2025)
-//            Morningstar "US Fund Fee Study 2024" (May 2025)
-// - expenses.js never throws — fallback values always returned.
+// - Fund type is derived programmatically from EDGAR holdings (assetCat
+//   distribution + name pattern matching). Claude is NOT asked to classify it.
+// - Claude is asked only for expense ratio (gross + net) with confidence flag.
+// - Cache: fund_profiles table, 90-day TTL (expense ratios change at most annually).
+// - Fallback: modifier 0 (neutral) on any failure — never throws.
+// - Benchmark vintage warning: emits console.warn if thresholds are ≥2 years
+//   old, prompting a human to refresh EXPENSE_RATIO_THRESHOLDS in constants.js.
 
-import { CLAUDE_MODEL, MONEY_MARKET_FUNDS } from './constants.js';
+import { CLAUDE_MODEL, EXPENSE_BENCHMARKS_VINTAGE, EXPENSE_RATIO_THRESHOLDS, MONEY_MARKET_FUNDS } from './constants.js';
 import { getFundProfile, setFundProfile } from '../services/cache.js';
 
-const EXPENSE_RETRIES  = 3;
-const EXPENSE_MAX_TOKENS = 800;
+// ── Benchmark vintage check ───────────────────────────────────────────────────
+// Runs once on module load. Warns in Railway logs if ICI/Morningstar data is
+// stale. Does not block execution — informational only.
+const vintageAge = new Date().getFullYear() - EXPENSE_BENCHMARKS_VINTAGE;
+if (vintageAge >= 2) {
+  console.warn(
+    `[expenses] Expense benchmarks are ${vintageAge} years old (vintage: ${EXPENSE_BENCHMARKS_VINTAGE}).` +
+    ` Consider refreshing EXPENSE_RATIO_THRESHOLDS in constants.js from ICI/Morningstar.`
+  );
+}
 
-// — ICI/Morningstar 2024 expense ratio thresholds by fund type —————————————
-// cheap:     at or below this is genuinely cheap for this category
-// expensive: at or above this warrants a penalty
-// These are 401(k) participant asset-weighted averages with percentile context.
-// scoring.js imports this to compute the ±0.5 composite score modifier.
-export const EXPENSE_THRESHOLDS = {
-  equity: {
-    passive: { cheap: 0.10, average: 0.20, expensive: 0.30 },  // index equity 401k avg ~0.11%
-    active:  { cheap: 0.40, average: 0.60, expensive: 0.80 },  // active equity 401k avg ~0.26-0.60%
-  },
-  bond: {
-    passive: { cheap: 0.15, average: 0.25, expensive: 0.40 },  // index bond avg ~0.11-0.15%
-    active:  { cheap: 0.30, average: 0.55, expensive: 0.70 },  // active bond 401k avg ~0.38%
-  },
-  hybrid: {
-    passive: { cheap: 0.15, average: 0.30, expensive: 0.45 },
-    active:  { cheap: 0.35, average: 0.55, expensive: 0.75 },  // target date avg ~0.29%
-  },
-  moneyMarket: {
-    passive: { cheap: 0.10, average: 0.22, expensive: 0.40 },  // money market avg 0.22% (2024)
-    active:  { cheap: 0.10, average: 0.22, expensive: 0.40 },  // same — no meaningful passive/active split
-  },
-};
+// ── Fund type classification ──────────────────────────────────────────────────
+// Derives fund type from EDGAR holdings assetCat distribution and fund name.
+// Returns one of: 'indexEquity' | 'activeEquity' | 'indexBond' | 'activeBond'
+//               | 'moneyMarket' | 'unknown'
+//
+// assetCat values from NPORT-P XML:
+//   EC   — equity / common stock
+//   DBT  — debt / bond
+//   STIV — short-term investment vehicle (money market)
+//   RF   — registered fund (fund-of-funds)
+//
+// Index detection: fund name contains 'index', '500', 'total market',
+// 'russell', 'msci', 'ftse', 's&p', 'nasdaq', 'dow jones'.
+export function classifyFundType(ticker, fundName, holdings) {
+  // Money market: known set takes priority
+  if (MONEY_MARKET_FUNDS.has(ticker)) return 'moneyMarket';
 
-// — Derive fund type from holdings + name ————————————————————————————————
-// Pure function — no API calls. Uses EDGAR assetCat distribution and name patterns.
-// assetCat values from NPORT-P XML: EC (equity), DBT (debt/bond),
-// RF (registered fund), STIV (short-term/money market), other
-export function deriveFundType(fund, holdings = []) {
-  // Money market funds — known set, skip analysis
-  if (MONEY_MARKET_FUNDS.has(fund.ticker)) {
-    return { category: 'moneyMarket', passive: false };
-  }
-
-  // Passive detection from fund name
-  const nameLower = (fund.name || '').toLowerCase();
-  const passive = /index|s&p|500|total market|russell|nasdaq|dow jones|wilshire|msci|ftse/i.test(nameLower);
-
-  // assetCat distribution from holdings
+  // Tally assetCat counts
   const counts = { EC: 0, DBT: 0, STIV: 0, RF: 0, OTHER: 0 };
-  holdings.forEach(h => {
+  for (const h of (holdings ?? [])) {
     const cat = (h.assetCat || '').toUpperCase();
-    if (cat === 'EC')   counts.EC++;
-    else if (cat === 'DBT')  counts.DBT++;
-    else if (cat === 'STIV') counts.STIV++;
-    else if (cat === 'RF')   counts.RF++;
-    else                     counts.OTHER++;
-  });
-
-  const total = holdings.length || 1;
-  const ecPct   = counts.EC   / total;
-  const dbtPct  = counts.DBT  / total;
-  const stivPct = counts.STIV / total;
-
-  // Classify by dominant asset category
-  let category;
-  if (stivPct > 0.80)       category = 'moneyMarket';
-  else if (ecPct  > 0.60)   category = 'equity';
-  else if (dbtPct > 0.60)   category = 'bond';
-  else                      category = 'hybrid';
-
-  // Bond name signals override if holdings are sparse
-  if (!holdings.length) {
-    if (/bond|income|fixed|treasury|credit|yield|debt/i.test(nameLower)) category = 'bond';
-    else if (/balanced|allocation|blend|multi/i.test(nameLower))          category = 'hybrid';
-    else                                                                   category = 'equity';
+    if (cat in counts) counts[cat]++;
+    else counts.OTHER++;
   }
 
-  return { category, passive };
+  const total = Object.values(counts).reduce((a, b) => a + b, 0);
+  if (total === 0) return 'unknown';
+
+  const pct = k => counts[k] / total;
+
+  // Majority STIV → money market
+  if (pct('STIV') > 0.5) return 'moneyMarket';
+
+  // Majority DBT → bond fund
+  if (pct('DBT') > 0.5) {
+    return isIndexFund(fundName) ? 'indexBond' : 'activeBond';
+  }
+
+  // Majority EC (or mixed with RF) → equity fund
+  if (pct('EC') > 0.3) {
+    return isIndexFund(fundName) ? 'indexEquity' : 'activeEquity';
+  }
+
+  return 'unknown';
 }
 
-// — Build Claude prompt ———————————————————————————————————————————————————
-function buildExpensePrompt(fund) {
-  return `What is the expense ratio for this mutual fund?
+function isIndexFund(name) {
+  if (!name) return false;
+  const n = name.toLowerCase();
+  return ['index', '500', 'total market', 'russell', 'msci', 'ftse',
+          's&p', 'nasdaq', 'dow jones'].some(kw => n.includes(kw));
+}
 
-Fund:   ${fund.name}
-Ticker: ${fund.ticker}
+// ── Net-value modifier ────────────────────────────────────────────────────────
+// Maps expense ratio to a ±0.5 modifier using the ICI/Morningstar thresholds
+// for the fund's type. Linear interpolation within the average band.
+//
+//   ratio ≤ cheap                → +0.5 (well below average)
+//   cheap < ratio < expensive    → linear +0.5 → -0.5
+//   ratio ≥ expensive            → -0.5 (well above average)
+//
+// 'unknown' fund type → 0 (neutral; no penalty for unclassified funds)
+export function calcExpenseModifier(expenseRatio, fundType) {
+  if (expenseRatio == null || fundType === 'unknown') return 0;
 
-Provide the most recent gross and net expense ratios you have knowledge of.
-Net expense ratio is what investors actually pay after any fee waivers.
-If gross and net are the same (no waiver), set both to the same value.
+  const thresholds = EXPENSE_RATIO_THRESHOLDS[fundType];
+  if (!thresholds) return 0;
 
-If there is a fee waiver or unusual situation, describe it briefly in the note field.
+  const { cheap, expensive } = thresholds;
 
-Respond ONLY with valid JSON in this exact format:
+  if (expenseRatio <= cheap)     return  0.5;
+  if (expenseRatio >= expensive) return -0.5;
+
+  // Linear interpolation: cheap → +0.5, expensive → -0.5
+  const t = (expenseRatio - cheap) / (expensive - cheap); // 0..1
+  return Math.round((0.5 - t) * 100) / 100;
+}
+
+// ── Claude: expense ratio fetch ───────────────────────────────────────────────
+// Asks Claude for gross and net expense ratio for the fund.
+// Returns { gross, net, note, confidence } or null on failure.
+async function fetchExpenseFromClaude(ticker, fundName) {
+  const prompt = `You are a mutual fund data assistant. Provide the current expense ratio for the following fund.
+
+Fund ticker: ${ticker}
+Fund name:   ${fundName}
+
+Respond ONLY with a JSON object. No preamble, no markdown, no explanation.
+
 {
-  "gross": <percentage as decimal, e.g. 0.015 for 0.015%>,
-  "net": <percentage as decimal>,
-  "note": "<brief note about waiver or situation, or null if none>",
-  "confidence": "<high | medium | low>"
+  "gross": <number — gross expense ratio as a decimal, e.g. 0.0075 for 0.75%>,
+  "net":   <number — net expense ratio after any fee waivers, same format. If no waiver, same as gross>,
+  "note":  <string — one sentence max. Note any active fee waiver or unusual structure. Empty string if none.>,
+  "confidence": <"high" | "medium" | "low">
 }
 
-confidence guidance:
-  high   — well-known fund, recently verified expense ratio
-  medium — reasonably confident but data may be slightly dated
-  low    — limited information or uncertain
+confidence guide:
+  high   — you have a specific, recent figure for this fund
+  medium — you have a figure but it may be slightly dated or estimated
+  low    — you are uncertain; the fund may have changed its fee structure recently`;
 
-Do not include any text outside the JSON object.`;
-}
-
-// — Score one fund with cache + retries ——————————————————————————————————
-async function scoreOneExpense(fund, holdings) {
-  // Derive fund type programmatically — no API call needed
-  const fundType = deriveFundType(fund, holdings);
-
-  // Check 90-day cache
   try {
-    const cached = await getFundProfile(fund.ticker);
+    const response = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model:      CLAUDE_MODEL,
+        max_tokens: 1000,
+        messages:   [{ role: 'user', content: prompt }],
+      }),
+    });
+
+    const data   = await response.json();
+    const text   = data?.content?.find(b => b.type === 'text')?.text ?? '';
+    const clean  = text.replace(/```json|```/g, '').trim();
+    const parsed = JSON.parse(clean);
+
+    if (typeof parsed.gross !== 'number' || typeof parsed.net !== 'number') {
+      throw new Error('Missing gross or net in Claude response');
+    }
+
+    return {
+      gross:      parsed.gross,
+      net:        parsed.net,
+      note:       parsed.note       ?? '',
+      confidence: parsed.confidence ?? 'low',
+    };
+  } catch (err) {
+    console.warn(`[expenses] Claude fetch failed for ${ticker}:`, err.message);
+    return null;
+  }
+}
+
+// ── Public entry point ────────────────────────────────────────────────────────
+// Returns:
+// {
+//   gross:      number | null,
+//   net:        number | null,
+//   note:       string,
+//   fundType:   string,
+//   modifier:   number,   ← ±0.5, applied by scoring.js after weighted sum
+//   confidence: string,
+//   fromCache:  boolean,
+// }
+//
+// Never throws. On any failure, modifier is 0 (neutral).
+export async function fetchExpenseData(ticker, fundName, holdings) {
+  const fundType = classifyFundType(ticker, fundName, holdings);
+
+  // Check Supabase cache (fund_profiles table, 90-day TTL)
+  try {
+    const cached = await getFundProfile(ticker);
     if (cached) {
+      // getFundProfile already checks the 90-day TTL and returns null if expired
+      const modifier = calcExpenseModifier(cached.net ?? cached.gross, fundType);
       return {
-        ticker:     fund.ticker,
         gross:      cached.gross      ?? null,
         net:        cached.net        ?? null,
-        note:       cached.note       ?? null,
-        confidence: cached.confidence ?? 'medium',
-        fundType:   cached.fund_type  ? JSON.parse(cached.fund_type) : fundType,
+        note:       cached.note       ?? '',
+        fundType,
+        modifier,
+        confidence: cached.confidence ?? 'low',
         fromCache:  true,
       };
     }
   } catch (err) {
-    console.warn('expenses.js: cache read failed for', fund.ticker, err.message);
+    console.warn(`[expenses] Cache read failed for ${ticker}:`, err.message);
   }
 
-  // Call Claude for expense ratio
-  const prompt = buildExpensePrompt(fund);
-  let gross = null, net = null, note = null, confidence = 'low';
+  // Fetch fresh from Claude
+  const result = await fetchExpenseFromClaude(ticker, fundName);
 
-  for (let attempt = 0; attempt <= EXPENSE_RETRIES; attempt++) {
-    try {
-      const res = await fetch('/api/claude', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          model:      CLAUDE_MODEL,
-          max_tokens: EXPENSE_MAX_TOKENS,
-          messages:   [{ role: 'user', content: prompt }],
-        }),
-      });
-      if (!res.ok) throw new Error('Claude API ' + res.status);
-
-      const data = await res.json();
-      const text = (data.content || []).map(b => b.text || '').join('').trim();
-      const clean = text.replace(/```json|```/g, '').trim();
-      const parsed = JSON.parse(clean);
-
-      gross = typeof parsed.gross === 'number' ? parsed.gross : null;
-      net   = typeof parsed.net   === 'number' ? parsed.net   : gross;
-
-      const validConf = ['high', 'medium', 'low'];
-      confidence = validConf.includes(parsed.confidence) ? parsed.confidence : 'medium';
-      note = parsed.note || null;
-      break;
-
-    } catch (err) {
-      if (attempt < EXPENSE_RETRIES) {
-        await new Promise(r => setTimeout(r, 600 * (attempt + 1)));
-        continue;
-      }
-      console.warn('expenses.js: Claude failed for', fund.ticker, 'after', EXPENSE_RETRIES + 1, 'attempts:', err.message);
-    }
+  if (!result) {
+    // Graceful fallback — neutral modifier, no penalty for data gaps
+    return { gross: null, net: null, note: '', fundType, modifier: 0, confidence: 'low', fromCache: false };
   }
 
-  const result = {
-    ticker: fund.ticker,
-    gross,
-    net,
-    note,
-    confidence,
-    fundType,
-    fromCache: false,
-  };
+  const modifier = calcExpenseModifier(result.net ?? result.gross, fundType);
 
-  // Persist to cache — non-fatal if it fails
+  // Persist to Supabase (fund_profiles table)
   try {
-    await setFundProfile(fund.ticker, {
-      gross,
-      net,
-      note,
-      confidence,
-      fund_type: JSON.stringify(fundType),
+    await setFundProfile(ticker, {
+      gross:      result.gross,
+      net:        result.net,
+      note:       result.note,
+      confidence: result.confidence,
     });
   } catch (err) {
-    console.warn('expenses.js: cache write failed for', fund.ticker, err.message);
+    console.warn(`[expenses] Cache write failed for ${ticker}:`, err.message);
+    // Non-fatal — return data even if save fails
   }
 
-  return result;
-}
-
-// — Public entry point ————————————————————————————————————————————————————
-// funds:       array of { ticker, name }
-// holdingsMap: { [ticker]: holdings[] } — from EDGAR, already fetched by pipeline
-//              pass {} if holdings not yet available — fund type falls back to name analysis
-export async function fetchExpenses(funds, holdingsMap = {}) {
-  if (!funds?.length) return {};
-
-  // Run all funds concurrently — cache hits return immediately
-  const results = await Promise.all(
-    funds.map(fund => scoreOneExpense(fund, holdingsMap[fund.ticker] ?? []))
-  );
-
-  // Return as map keyed by ticker
-  const expenses = {};
-  results.forEach(r => { expenses[r.ticker] = r; });
-  return expenses;
+  return {
+    gross:      result.gross,
+    net:        result.net,
+    note:       result.note,
+    fundType,
+    modifier,
+    confidence: result.confidence,
+    fromCache:  false,
+  };
 }
