@@ -5,6 +5,14 @@ import LoginPage from './components/auth/LoginPage.jsx';
 import SetupWizard from './components/wizard/SetupWizard.jsx';
 import AppShell from './components/layout/AppShell.jsx';
 
+// Race a promise against a timeout — resolves to fallback if the promise hangs
+function withTimeout(promise, ms, fallback) {
+  return Promise.race([
+    promise,
+    new Promise(resolve => setTimeout(() => resolve(fallback), ms)),
+  ]);
+}
+
 export default function App() {
   const setUser        = useAppStore(s => s.setUser);
   const setProfile     = useAppStore(s => s.setProfile);
@@ -42,23 +50,25 @@ export default function App() {
       const params = new URLSearchParams(hash.replace('#', ''));
       const desc = params.get('error_description') || 'Authentication error';
       setAuthError(desc.replace(/\+/g, ' '));
-      // Clean the URL so the error hash doesn't persist on refresh
       window.history.replaceState(null, '', window.location.pathname);
       setAuthLoading(false);
       return;
     }
 
-    // Normal session boot
-    supabase.auth.getSession().then(async ({ data: { session: s } }) => {
-      setSession(s);
-      setUser(s?.user ?? null);
-      if (s?.user) await loadUserData(s.user.id);
-      setAuthLoading(false);
-    }).catch(err => {
-      // Supabase unreachable or auth service down — don't hang forever
-      console.error('getSession failed:', err);
-      setAuthLoading(false);
-    });
+    // Normal session boot — 5s timeout so the app never hangs
+    const TIMEOUT_FALLBACK = { data: { session: null } };
+
+    withTimeout(supabase.auth.getSession(), 5000, TIMEOUT_FALLBACK)
+      .then(async ({ data: { session: s } }) => {
+        setSession(s);
+        setUser(s?.user ?? null);
+        if (s?.user) await loadUserData(s.user.id);
+        setAuthLoading(false);
+      })
+      .catch(err => {
+        console.error('getSession failed:', err);
+        setAuthLoading(false);
+      });
 
     const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, s) => {
       setSession(s);
@@ -76,7 +86,6 @@ export default function App() {
     return () => subscription.unsubscribe();
   }, []);
 
-  // Show auth error (e.g. expired confirmation link) with option to go back to login
   if (authError) {
     return (
       <div style={{ minHeight:'100vh', display:'flex', flexDirection:'column', alignItems:'center',
