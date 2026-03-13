@@ -1,21 +1,21 @@
-// FundLens v4 — World data fetcher
+// FundLens v4 â World data fetcher
 // Fetches and caches the macro environment: FRED economic series,
 // Treasury yield curve, and financial news headlines.
 //
 // Architecture notes:
-// - FRED fetches are SEQUENTIAL (one at a time) — FRED rate limits aggressively.
+// - FRED fetches are SEQUENTIAL (one at a time) â FRED rate limits aggressively.
 // - Treasury and news fetches happen after FRED completes.
-// - Cache TTL is DEFAULT_WORLD_TTL_MINS (60 min) — checked by caller.
+// - Cache TTL is DEFAULT_WORLD_TTL_MINS (60 min) â checked by caller.
 // - Treasury data is stored in its own Supabase column (treasury_data), separate
 //   from fred_data, because yield curve values are forward-looking market signals
 //   while FRED series are lagging economic measurements. They serve different
 //   purposes in mandate.js scoring and should not be mixed.
 
-import { FRED_SERIES, RSS_FEEDS, DEFAULT_WORLD_TTL_MINS } from './constants.js';
+import { FRED_SERIES, RSS_FEEDS, DEFAULT_WORLD_TTL_MINS, MAX_HEADLINES, GDELT_QUERY } from './constants.js';
 import { fetchFredSeries, fetchTreasury, fetchGdelt, fetchRSS } from '../services/api.js';
 import { getWorldData, setWorldData } from '../services/cache.js';
 
-// — FRED ——————————————————————————————————————————————————————————————————
+// â FRED ââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
 // Fetch all 10 series sequentially. FRED rate-limits concurrent requests.
 // Each series returns up to 5 observations (sorted desc); we take the first
 // whose value is not '.' (missing data marker used during reporting lags).
@@ -42,12 +42,12 @@ async function buildFredData() {
   return fredData;
 }
 
-// — Treasury yield curve ——————————————————————————————————————————————————
+// â Treasury yield curve ââââââââââââââââââââââââââââââââââââââââââââââââââ
 // fetchTreasury() returns { date, y1, y2, y5, y10, y30 } directly.
 // We compute four spreads that each measure a different part of the curve:
 //
 //   shortEnd : y2  - y1           Fed policy signal (near-term rate expectations)
-//   belly    : y5  - (y2+y10)/2   Curve curvature — is the middle bowed up or down?
+//   belly    : y5  - (y2+y10)/2   Curve curvature â is the middle bowed up or down?
 //   classic  : y10 - y2           Classic recession predictor (most-watched spread)
 //   longEnd  : y30 - y10          Long-term inflation expectations
 //
@@ -81,7 +81,7 @@ async function buildTreasuryData() {
   }
 }
 
-// — RSS parsing ———————————————————————————————————————————————————————————
+// â RSS parsing âââââââââââââââââââââââââââââââââââââââââââââââââââââââââââ
 // Parse an RSS XML string into a flat array of headline objects.
 // Handles both <item> (RSS 2.0) and <entry> (Atom) elements.
 function parseRSS(xmlText, label) {
@@ -107,10 +107,10 @@ function parseRSS(xmlText, label) {
   }
 }
 
-// — News: RSS + GDELT merge ———————————————————————————————————————————————
+// â News: RSS + GDELT merge âââââââââââââââââââââââââââââââââââââââââââââââ
 // Order of operations:
-//   1. Fetch all 4 RSS feeds sequentially — these are higher quality, go first
-//   2. Fetch GDELT — broader coverage, appended after RSS
+//   1. Fetch all 4 RSS feeds sequentially â these are higher quality, go first
+//   2. Fetch GDELT â broader coverage, appended after RSS
 //   3. Deduplicate by first 60 chars of lowercased title
 //   4. Slice to 36 headlines
 async function buildHeadlines() {
@@ -125,7 +125,7 @@ async function buildHeadlines() {
     headlines.push(h);
   };
 
-  // RSS feeds — sequential
+  // RSS feeds â sequential
   for (const feed of RSS_FEEDS) {
     try {
       const xml = await fetchRSS(feed.url);
@@ -136,10 +136,10 @@ async function buildHeadlines() {
     }
   }
 
-  // GDELT — appended after RSS
+  // GDELT â appended after RSS
   try {
     const gdelt = await fetchGdelt({
-      query:    'finance economy market',
+      query:    GDELT_QUERY,
       mode:     'artlist',
       maxrecords: 25,
       format:   'json',
@@ -155,10 +155,10 @@ async function buildHeadlines() {
     console.warn('world.js: GDELT fetch failed', err.message);
   }
 
-  return headlines.slice(0, 36);
+  return headlines.slice(0, MAX_HEADLINES);
 }
 
-// — Public entry point ————————————————————————————————————————————————————
+// â Public entry point ââââââââââââââââââââââââââââââââââââââââââââââââââââ
 // force=true bypasses the TTL check and always fetches fresh data.
 // Called by pipeline.js at the start of every run.
 export async function fetchWorldData(force = false) {
@@ -179,7 +179,7 @@ export async function fetchWorldData(force = false) {
         }
       }
     } catch (err) {
-      // Cache miss or Supabase unavailable — fall through to fresh fetch
+      // Cache miss or Supabase unavailable â fall through to fresh fetch
       console.warn('world.js: cache read failed, fetching fresh', err.message);
     }
   }
@@ -196,7 +196,7 @@ export async function fetchWorldData(force = false) {
     await setWorldData(fredData, headlines, treasuryData);
   } catch (err) {
     console.warn('world.js: cache write failed', err.message);
-    // Non-fatal — return data even if save fails
+    // Non-fatal â return data even if save fails
   }
 
   return {
