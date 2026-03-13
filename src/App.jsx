@@ -29,16 +29,39 @@ export default function App() {
   const loadUserData = async (userId) => {
     setDataLoading(true);
     try {
-      const [profileRes, fundsRes, weightsRes] = await Promise.all([
+      // Run each query individually with logging so we can see which one hangs
+      console.log('[App] loadUserData: fetching profiles...');
+      const profileRes = await withTimeout(
         supabase.from('profiles').select('*').eq('id', userId).maybeSingle(),
+        8000,
+        { data: null, error: { message: 'profiles query timed out' } }
+      );
+      if (profileRes.error) console.warn('[App] profiles error:', profileRes.error.message);
+      else console.log('[App] profiles OK');
+
+      console.log('[App] loadUserData: fetching user_funds...');
+      const fundsRes = await withTimeout(
         supabase.from('user_funds').select('*').eq('user_id', userId).order('sort_order'),
+        8000,
+        { data: [], error: { message: 'user_funds query timed out' } }
+      );
+      if (fundsRes.error) console.warn('[App] user_funds error:', fundsRes.error.message);
+      else console.log('[App] user_funds OK:', (fundsRes.data || []).length, 'rows');
+
+      console.log('[App] loadUserData: fetching user_weights...');
+      const weightsRes = await withTimeout(
         supabase.from('user_weights').select('*').eq('user_id', userId).maybeSingle(),
-      ]);
+        8000,
+        { data: null, error: { message: 'user_weights query timed out' } }
+      );
+      if (weightsRes.error) console.warn('[App] user_weights error:', weightsRes.error.message);
+      else console.log('[App] user_weights OK');
+
       setProfile(profileRes.data   || null);
       setUserFunds(fundsRes.data   || []);
       setUserWeights(weightsRes.data || null);
     } catch (e) {
-      console.error('loadUserData error:', e);
+      console.error('[App] loadUserData error:', e);
     }
     setDataLoading(false);
   };
@@ -56,17 +79,19 @@ export default function App() {
     }
 
     // Normal session boot — 5s timeout so the app never hangs
+    console.log('[App] Calling getSession...');
     const TIMEOUT_FALLBACK = { data: { session: null } };
 
     withTimeout(supabase.auth.getSession(), 5000, TIMEOUT_FALLBACK)
       .then(async ({ data: { session: s } }) => {
+        console.log('[App] getSession resolved, session:', s ? 'YES' : 'NO');
         setSession(s);
         setUser(s?.user ?? null);
         if (s?.user) await loadUserData(s.user.id);
         setAuthLoading(false);
       })
       .catch(err => {
-        console.error('getSession failed:', err);
+        console.error('[App] getSession failed:', err);
         setAuthLoading(false);
       });
 
