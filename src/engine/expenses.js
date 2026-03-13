@@ -7,6 +7,8 @@
 // - Fund type is derived programmatically from EDGAR holdings (assetCat
 //   distribution + name pattern matching). Claude is NOT asked to classify it.
 // - Claude is asked only for expense ratio (gross + net) with confidence flag.
+// - Claude calls route through /api/claude (Railway proxy) — no Anthropic key
+//   on the client. Same pattern as manager.js.
 // - Cache: fund_profiles table, 90-day TTL (expense ratios change at most annually).
 // - Fallback: modifier 0 (neutral) on any failure — never throws.
 // - Benchmark vintage warning: emits console.warn if thresholds are ≥2 years
@@ -105,7 +107,7 @@ export function calcExpenseModifier(expenseRatio, fundType) {
 }
 
 // ── Claude: expense ratio fetch ───────────────────────────────────────────────
-// Asks Claude for gross and net expense ratio for the fund.
+// Calls /api/claude (Railway proxy — API key injected server-side).
 // Returns { gross, net, note, confidence } or null on failure.
 async function fetchExpenseFromClaude(ticker, fundName) {
   const prompt = `You are a mutual fund data assistant. Provide the current expense ratio for the following fund.
@@ -128,18 +130,18 @@ confidence guide:
   low    — you are uncertain; the fund may have changed its fee structure recently`;
 
   try {
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
+    const res = await fetch('/api/claude', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         model:      CLAUDE_MODEL,
-        max_tokens: 1000,
+        max_tokens: 256,
         messages:   [{ role: 'user', content: prompt }],
       }),
     });
 
-    const data   = await response.json();
-    const text   = data?.content?.find(b => b.type === 'text')?.text ?? '';
+    const data   = await res.json();
+    const text   = (data.content || []).map(b => b.text || '').join('').trim();
     const clean  = text.replace(/```json|```/g, '').trim();
     const parsed = JSON.parse(clean);
 
@@ -175,11 +177,10 @@ confidence guide:
 export async function fetchExpenseData(ticker, fundName, holdings) {
   const fundType = classifyFundType(ticker, fundName, holdings);
 
-  // Check Supabase cache (fund_profiles table, 90-day TTL)
+  // Check Supabase cache (fund_profiles table, 90-day TTL enforced by getFundProfile)
   try {
     const cached = await getFundProfile(ticker);
     if (cached) {
-      // getFundProfile already checks the 90-day TTL and returns null if expired
       const modifier = calcExpenseModifier(cached.net ?? cached.gross, fundType);
       return {
         gross:      cached.gross      ?? null,
