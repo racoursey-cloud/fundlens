@@ -2,6 +2,8 @@
 // All external API calls route through the Railway proxy (server.js).
 // No API keys are ever present in the client.
 
+import { CLAUDE_MODEL } from '../engine/constants.js';
+
 const BASE = '';  // Same origin — Railway serves both static files and the proxy
 
 // — Core fetch wrapper ————————————————————————————————————————————————————
@@ -50,7 +52,7 @@ async function apiText(path, options = {}, retries = 1) {
 
 export async function callClaude({ system, user, maxTokens = 1024, json = false }) {
   const messages = [{ role: 'user', content: user }];
-  const body = { messages, max_tokens: maxTokens };
+  const body = { model: CLAUDE_MODEL, messages, max_tokens: maxTokens };
   if (system) body.system = system;
 
   const res = await apiFetch('/api/claude', {
