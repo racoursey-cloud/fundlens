@@ -1,91 +1,193 @@
-import { DEFAULT_WEIGHTS, getTierFromModZ } from './constants.js';
+// FundLens v4 — Composite score engine
+// Combines all engine outputs into a single composite score (1.0–10.0) per fund.
+//
+// Formula:
+//   raw = (mandateScore * W_mandate)
+//       + (momentum1to10 * W_momentum)
+//       + (sharpe1to10   * W_riskAdj)
+//       + (managerScore  * W_managerQuality)
+//
+//   penalised = raw - concentrationPenalty
+//   modified  = penalised + expenseModifier   ← ±0.5, applied after weighted sum
+//   composite = clamp(modified, 1.0, 10.0)
+//
+// Weights come from the user's saved preferences (useAppStore → DEFAULT_WEIGHTS
+// as fallback). They are integers summing to 100; divide by 100 for multiplication.
+//
+// Architecture notes:
+// - All sub-scores are normalised to 1–10 before weighting.
+// - Null sub-scores fall back to 5.0 (neutral) with a data-quality flag.
+// - concentrationPenalty: 0–2 points deducted when top-3 holdings > 30% of NAV.
+// - expenseModifier: ±0.5 from expenses.js, applied last before clamping.
+// - Money market funds receive a fixed composite of 5.0 (neutral sentinel).
+// - Returns a dataQuality object so the UI can display coverage warnings.
 
-// Normalize raw integer weights (e.g. {mandateScore:40,...}) to fractions summing to 1.0.
-function normalizeWeights(W) {
-  const total = Object.values(W).reduce((s, v) => s + v, 0);
-  if (total === 0) {
-    const keys = Object.keys(DEFAULT_WEIGHTS);
-    return Object.fromEntries(keys.map(k => [k, 1 / keys.length]));
+import { DEFAULT_WEIGHTS, MONEY_MARKET_FUNDS } from './constants.js';
+
+// ── Normalisation helpers ─────────────────────────────────────────────────────
+
+// Momentum is a raw return (e.g. 0.08 = +8%, -0.15 = -15%).
+// Map to 1–10 using a sigmoid-style clamp centred at 0.
+// ±20% maps to roughly 9/1; 0% maps to 5.5 (slight positive bias).
+export function momentumToScore(momentum) {
+  if (momentum == null) return null;
+  // Clamp to ±30% then linearly map to 1–10
+  const clamped = Math.max(-0.30, Math.min(0.30, momentum));
+  return Math.round(((clamped + 0.30) / 0.60) * 9 + 1) * 10 / 10;
+}
+
+// Sharpe ratio to 1–10.
+// Typical mutual fund range: -1 to +2.5. Map linearly; clamp outside that.
+export function sharpeToScore(sharpe) {
+  if (sharpe == null) return null;
+  const clamped = Math.max(-1.0, Math.min(2.5, sharpe));
+  return Math.round(((clamped + 1.0) / 3.5) * 9 + 1) * 10 / 10;
+}
+
+// ── Concentration penalty ─────────────────────────────────────────────────────
+// Deduct up to 2 points when the top 3 holdings are heavily concentrated.
+// holdings: array from edgar.js, sorted by weight desc.
+// Only applies to equity funds — bond funds naturally hold many small positions.
+export function calcConcentrationPenalty(holdings) {
+  if (!holdings?.length) return 0;
+
+  // Only penalise equity-heavy funds
+  const equityCount = holdings.filter(h => h.assetCat === 'EC').length;
+  if (equityCount < holdings.length * 0.3) return 0; // <30% equity → skip
+
+  const top3Weight = holdings
+    .slice(0, 3)
+    .reduce((sum, h) => sum + (h.weight ?? 0), 0);
+
+  if (top3Weight <= 30) return 0;
+  if (top3Weight >= 60) return 2.0;
+
+  // Linear: 30% → 0 penalty, 60% → 2.0 penalty
+  return Math.round(((top3Weight - 30) / 30) * 2.0 * 100) / 100;
+}
+
+// ── Main composite scorer ─────────────────────────────────────────────────────
+// Arguments:
+//   ticker         — fund ticker string
+//   mandateScore   — 1–10 from mandate.js (null → 5 fallback)
+//   tiingoMetrics  — { momentum, sharpe } from tiingo.js
+//   managerScore   — 1–10 from manager.js (null → 5 fallback)
+//   expenseResult  — { modifier } from expenses.js
+//   holdings       — array from edgar.js (for concentration penalty)
+//   weights        — { mandateScore, momentum, riskAdj, managerQuality } integers summing to 100
+//
+// Returns:
+// {
+//   composite:           number,   ← 1.0–10.0
+//   breakdown: {
+//     mandateScore:      number,
+//     momentum:          number,
+//     riskAdj:           number,
+//     managerQuality:    number,
+//     concentrationPenalty: number,
+//     expenseModifier:   number,
+//   },
+//   dataQuality: {
+//     mandateFallback:   boolean,
+//     momentumFallback:  boolean,
+//     sharpeFallback:    boolean,
+//     managerFallback:   boolean,
+//     expenseFallback:   boolean,
+//     holdingsFallback:  boolean,
+//   },
+// }
+export function calcCompositeScore({
+  ticker,
+  mandateScore,
+  tiingoMetrics,
+  managerScore,
+  expenseResult,
+  holdings,
+  weights = DEFAULT_WEIGHTS,
+}) {
+  // Money market funds: fixed neutral composite
+  if (MONEY_MARKET_FUNDS.has(ticker)) {
+    return {
+      composite: 5.0,
+      breakdown: {
+        mandateScore:         5.0,
+        momentum:             5.0,
+        riskAdj:              5.0,
+        managerQuality:       5.0,
+        concentrationPenalty: 0,
+        expenseModifier:      0,
+      },
+      dataQuality: {
+        mandateFallback:  false,
+        momentumFallback: false,
+        sharpeFallback:   false,
+        managerFallback:  false,
+        expenseFallback:  false,
+        holdingsFallback: false,
+      },
+    };
   }
-  return Object.fromEntries(Object.entries(W).map(([k, v]) => [k, v / total]));
-}
 
-// Compute composite score (1–10) for a single fund.
-// factors: { mandateScore, momentum, riskAdj, managerQuality }
-// concentrationPenalty: HHI-based penalty computed in pipeline from sectorExposure
-// weights: raw integer weights from user_weights (or DEFAULT_WEIGHTS)
-export function computeComposite(factors, concentrationPenalty = 0, weights = DEFAULT_WEIGHTS) {
-  const W = normalizeWeights(weights);
-  const { mandateScore, momentum, riskAdj, managerQuality } = factors;
-  return +Math.min(10, Math.max(1,
-    mandateScore   * (W.mandateScore   || 0.40) +
-    momentum       * (W.momentum       || 0.25) +
-    riskAdj        * (W.riskAdj        || 0.20) +
-    managerQuality * (W.managerQuality || 0.15)
-    - concentrationPenalty
-  )).toFixed(2);
-}
+  // Normalise weights to fractions
+  const total = (weights.mandateScore ?? 40)
+              + (weights.momentum     ?? 25)
+              + (weights.riskAdj      ?? 20)
+              + (weights.managerQuality ?? 15);
 
-// HHI-based concentration penalty.
-// sectorExposure: { [sectorName]: pctVal } where pctVal is 0–100
-export function computeConcentrationPenalty(sectorExposure) {
-  const hhi = Object.values(sectorExposure).reduce((s, v) => s + (v / 100) * (v / 100), 0);
-  return Math.max(0, (hhi - 0.18) * 1.5);
-}
+  const W = {
+    mandate: (weights.mandateScore  ?? 40) / total,
+    momentum: (weights.momentum     ?? 25) / total,
+    riskAdj:  (weights.riskAdj      ?? 20) / total,
+    manager:  (weights.managerQuality ?? 15) / total,
+  };
 
-// Apply modified Z-score (median + MAD) across the full fund universe.
-// Annotates each fund with modZ and tier. Returns array sorted descending by composite.
-// Ported verbatim from v3 applyStatisticalAnalysis.
-export function applyStatisticalAnalysis(funds) {
-  const scores = funds.map(f => f.composite);
+  // Sub-scores with fallback tracking
+  const dataQuality = {
+    mandateFallback:  false,
+    momentumFallback: false,
+    sharpeFallback:   false,
+    managerFallback:  false,
+    expenseFallback:  false,
+    holdingsFallback: false,
+  };
 
-  const sorted = [...scores].sort((a, b) => a - b);
-  const n = sorted.length;
-  const median = n % 2 === 0
-    ? (sorted[n / 2 - 1] + sorted[n / 2]) / 2
-    : sorted[Math.floor(n / 2)];
+  const mandate = mandateScore != null ? mandateScore : (dataQuality.mandateFallback = true, 5.0);
 
-  const deviations = scores.map(s => Math.abs(s - median));
-  const devSorted = [...deviations].sort((a, b) => a - b);
-  const mad = n % 2 === 0
-    ? (devSorted[n / 2 - 1] + devSorted[n / 2]) / 2
-    : devSorted[Math.floor(n / 2)];
+  const rawMomentum = momentumToScore(tiingoMetrics?.momentum ?? null);
+  const momentum    = rawMomentum  != null ? rawMomentum  : (dataQuality.momentumFallback = true, 5.0);
 
-  return funds.map(f => {
-    const modZ = mad > 0 ? +(0.6745 * (f.composite - median) / mad).toFixed(3) : 0;
-    const tier = getTierFromModZ(modZ);
-    return { ...f, modZ, tier, median, mad };
-  }).sort((a, b) => b.composite - a.composite);
-}
+  const rawSharpe = sharpeToScore(tiingoMetrics?.sharpe ?? null);
+  const sharpe    = rawSharpe != null ? rawSharpe : (dataQuality.sharpeFallback = true, 5.0);
 
-// Build risk-tolerance-aware allocation from ranked funds.
-// Pure function — ported verbatim from v3 buildAllocation.
-export function buildAllocation(rankedFunds, riskTolerance) {
-  const rt = riskTolerance || 5;
+  const manager = managerScore != null ? managerScore : (dataQuality.managerFallback = true, 5.0);
 
-  const eligible = rankedFunds.filter(f => {
-    if (rt <= 3) return f.modZ >= -0.3 && f.riskAdj >= 4.5;
-    if (rt <= 5) return f.modZ >= 0.1;
-    if (rt <= 7) return f.modZ >= 0.3 || f.composite >= 6;
-    return f.modZ >= 0.5 || f.composite >= 5.5;
-  });
+  const expenseModifier = expenseResult?.modifier ?? (dataQuality.expenseFallback = true, 0);
 
-  if (!eligible.length) return [];
+  if (!holdings?.length) dataQuality.holdingsFallback = true;
 
-  let maxFunds;
-  if (rt <= 2)      maxFunds = Math.min(8, eligible.length);
-  else if (rt <= 4) maxFunds = Math.min(6, eligible.length);
-  else if (rt <= 6) maxFunds = Math.min(5, eligible.length);
-  else              maxFunds = Math.min(3, eligible.length);
+  // Weighted sum
+  const raw = (mandate  * W.mandate)
+            + (momentum * W.momentum)
+            + (sharpe   * W.riskAdj)
+            + (manager  * W.manager);
 
-  const selected = eligible.slice(0, maxFunds);
+  // Concentration penalty
+  const concentrationPenalty = calcConcentrationPenalty(holdings);
 
-  const concentrationPower = 0.5 + rt * 0.15;
-  const rawAllocs = selected.map(f => Math.pow(f.composite, concentrationPower));
-  const total = rawAllocs.reduce((s, v) => s + v, 0);
+  // Apply expense modifier and clamp
+  const modified  = raw - concentrationPenalty + expenseModifier;
+  const composite = Math.round(Math.max(1.0, Math.min(10.0, modified)) * 10) / 10;
 
-  return selected.map((f, i) => ({
-    ...f,
-    allocationPct: +(rawAllocs[i] / total * 100).toFixed(1),
-  }));
+  return {
+    composite,
+    breakdown: {
+      mandateScore:         Math.round(mandate  * 10) / 10,
+      momentum:             Math.round(momentum * 10) / 10,
+      riskAdj:              Math.round(sharpe   * 10) / 10,
+      managerQuality:       Math.round(manager  * 10) / 10,
+      concentrationPenalty: Math.round(concentrationPenalty * 100) / 100,
+      expenseModifier:      Math.round(expenseModifier       * 100) / 100,
+    },
+    dataQuality,
+  };
 }
