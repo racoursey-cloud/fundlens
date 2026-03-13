@@ -1,23 +1,40 @@
 // FundLens v4 — EDGAR holdings fetcher
 // Fetches the latest NPORT-P filing for a fund and returns parsed holdings.
 // Three CIK lookup strategies, verbatim from v3.
+// MF tickers file is loaded once per session and cached in memory.
 
-const CLAUDE_MODEL = 'claude-haiku-4-5-20251001';
+import { CLAUDE_MODEL } from './constants.js';
 
-// ── CIK lookup strategy 1: SEC company_tickers_mf.json ───────────────────────
+// Module-level cache for the SEC mutual fund tickers file.
+// Loaded once on first call, reused for every subsequent fund lookup.
+// Prevents 22 identical fetches of the same large file per pipeline run.
+let _mfTickersCache = null;
+
+// — CIK lookup strategy 1: SEC company_tickers_mf.json ——————————————————
 
 async function cikFromMfJson(ticker) {
-  const res = await fetch('/api/www4sec/files/company_tickers_mf.json');
-  if (!res.ok) return null;
-  const data = await res.json();
-  // data is an object keyed by index; each value has { cik_str, ticker, ... }
-  const entry = Object.values(data).find(
-    e => (e.ticker || '').toUpperCase() === ticker.toUpperCase()
-  );
-  return entry ? String(entry.cik_str) : null;
+  if (!_mfTickersCache) {
+    try {
+      const res = await fetch('/api/www4sec/files/company_tickers_mf.json');
+      if (!res.ok) {
+        _mfTickersCache = {}; // mark as attempted so we don't retry on every fund
+        return null;
+      }
+      const data = await res.json();
+      // data is an object keyed by index; each value has { cik_str, ticker, ... }
+      _mfTickersCache = {};
+      Object.values(data).forEach(row => {
+        if (row.ticker) _mfTickersCache[row.ticker.toUpperCase()] = String(row.cik_str);
+      });
+    } catch (e) {
+      console.warn('MF tickers file failed to load:', e.message);
+      _mfTickersCache = {};
+    }
+  }
+  return _mfTickersCache[ticker.toUpperCase()] || null;
 }
 
-// ── CIK lookup strategy 2: EFTS full-text search ─────────────────────────────
+// — CIK lookup strategy 2: EFTS full-text search ————————————————————————
 
 async function cikFromEfts(ticker) {
   const url = '/api/efts/LATEST/search-index?q='
@@ -29,7 +46,7 @@ async function cikFromEfts(ticker) {
   return hit?.entity_id ? String(hit.entity_id) : null;
 }
 
-// ── CIK lookup strategy 3: fund name words fallback ──────────────────────────
+// — CIK lookup strategy 3: fund name words fallback ————————————————————
 
 async function cikFromName(fundName) {
   if (!fundName) return null;
@@ -45,26 +62,30 @@ async function cikFromName(fundName) {
   return hit?.entity_id ? String(hit.entity_id) : null;
 }
 
-// ── Fetch latest NPORT-P accession for a CIK ─────────────────────────────────
+// — Fetch latest NPORT-P accession for a CIK ————————————————————————————
 
 async function fetchNportByCIK(cik, ticker) {
   const padded = cik.padStart(10, '0');
   const res    = await fetch('/api/edgar/submissions/CIK' + padded + '.json');
   if (!res.ok) throw new Error('EDGAR submissions ' + res.status + ' for ' + ticker);
+  const data     = await res.json();
+  const filings  = data.filings?.recent;
+  if (!filings?.form) return null;
 
-  const data   = await res.json();
-  const recent = data?.filings?.recent;
-  if (!recent) throw new Error('No filings in EDGAR response for ' + ticker);
+  let latestIdx = -1;
+  filings.form.forEach((form, i) => {
+    if (form === 'NPORT-P') {
+      if (latestIdx === -1 || filings.filingDate[i] > filings.filingDate[latestIdx]) {
+        latestIdx = i;
+      }
+    }
+  });
+  if (latestIdx === -1) return null;
 
-  // Find latest NPORT-P by filingDate (already sorted desc by EDGAR)
-  const idx = (recent.form || []).findIndex(f => f === 'NPORT-P');
-  if (idx === -1) throw new Error('No NPORT-P found for ' + ticker);
-
-  const accNo = recent.accessionNumber[idx];
-  return fetchNportByAccession(cik, accNo, ticker);
+  return fetchNportByAccession(cik, filings.accessionNumber[latestIdx], ticker);
 }
 
-// ── Fetch and parse XML from a known accession number ────────────────────────
+// — Fetch and parse XML from a known accession number ————————————————————
 
 async function fetchNportByAccession(cik, accNo, ticker) {
   const accNoDashes = accNo.replace(/-/g, '');
@@ -94,7 +115,7 @@ async function fetchNportByAccession(cik, accNo, ticker) {
   return parseNportXML(xmlText, ticker);
 }
 
-// ── Parse NPORT-P XML into holdings array ─────────────────────────────────────
+// — Parse NPORT-P XML into holdings array ————————————————————————————————
 
 function parseNportXML(xmlText, ticker) {
   const parser = new DOMParser();
@@ -108,25 +129,23 @@ function parseNportXML(xmlText, ticker) {
     const get = tag => node.querySelector(tag)?.textContent?.trim() || '';
 
     // Ticker lives inside <identifiers><ticker value="..."/>
-    const tickerEl = node.querySelector('identifiers ticker');
+    const tickerEl    = node.querySelector('identifiers ticker');
     const holdingTicker = tickerEl?.getAttribute('value') || '';
 
     const pctVal = parseFloat(get('pctVal'));
     if (!pctVal || pctVal <= 0) return;
 
     raw.push({
-      name:        get('name'),
-      ticker:      holdingTicker.toUpperCase(),
-      cusip:       get('cusip'),
-      pctVal:      pctVal,
-      valUSD:      parseFloat(get('valUSD')) || 0,
-      assetCat:    get('assetCat'),
-      invCountry:  get('invCountry'),
-      sector:      null,   // filled in by pipeline via sector_mappings
+      name:     get('name'),
+      ticker:   holdingTicker.toUpperCase(),
+      cusip:    get('cusip'),
+      pctVal:   pctVal,
+      valUSD:   parseFloat(get('valUSD'))  || 0,
+      shares:   parseFloat(get('shares'))  || 0,
+      assetCat: get('assetCat'),
+      sector:   '',
     });
   });
-
-  if (!raw.length) return null;
 
   raw.sort((a, b) => b.pctVal - a.pctVal);
 
@@ -139,7 +158,7 @@ function parseNportXML(xmlText, ticker) {
   return raw;
 }
 
-// ── Classify unknown sectors via Claude (batched, concurrent) ─────────────────
+// — Classify unknown sectors via Claude (batched, concurrent) ————————————
 // unknownHoldings: array of { ticker, name }
 // Returns: { [ticker]: sector }
 
@@ -160,7 +179,7 @@ export async function classifyUnknownSectors(unknownHoldings) {
 
   const results = await Promise.all(
     pages.map(async page => {
-      const list = page.map(h => (h.ticker || 'UNKNOWN') + '|' + h.name).join('\n');
+      const list   = page.map(h => (h.ticker || 'UNKNOWN') + '|' + h.name).join('\n');
       const prompt = 'Classify each holding by GICS sector.\n'
         + 'Valid sectors: ' + VALID_SECTORS.join(', ') + '\n'
         + 'Format: respond ONLY with valid JSON: {"classifications":{"TICKER":"SECTOR"}}\n'
@@ -178,8 +197,8 @@ export async function classifyUnknownSectors(unknownHoldings) {
           }),
         });
         if (!res.ok) return {};
-        const data = await res.json();
-        const text = (data.content || []).map(b => b.text || '').join('').trim();
+        const data  = await res.json();
+        const text  = (data.content || []).map(b => b.text || '').join('').trim();
         const clean = text.replace(/```json|```/g, '').trim();
         const parsed = JSON.parse(clean);
         return parsed.classifications || {};
@@ -192,12 +211,12 @@ export async function classifyUnknownSectors(unknownHoldings) {
   return Object.assign({}, ...results);
 }
 
-// ── Public entry point ────────────────────────────────────────────────────────
+// — Public entry point ————————————————————————————————————————————————————
 
 export async function fetchEdgarHoldings(ticker, fundName) {
   let cik = null;
 
-  // Strategy 1: MF ticker JSON
+  // Strategy 1: MF ticker JSON (fastest, most reliable)
   try { cik = await cikFromMfJson(ticker); } catch (_) {}
 
   // Strategy 2: EFTS full-text search
