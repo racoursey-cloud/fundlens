@@ -98,7 +98,7 @@ function buildMacroContext(worldData) {
 function buildFundPrompt(macroContext, fund) {
   const holdings = (fund.holdings || [])
     .slice(0, MANDATE_TOP_HOLDINGS)
-    .map(h => `    ${h.pctVal?.toFixed(1) ?? '?'}%  ${h.ticker || 'N/A'}  ${h.name || ''}  [${h.sector || 'Unknown'}]`)
+    .map(h => `    ${h.weight?.toFixed(1) ?? '?'}%  ${h.ticker || 'N/A'}  ${h.name || ''}  [${h.sector || 'Unknown'}]`)
     .join('\n');
 
   return `${macroContext}
