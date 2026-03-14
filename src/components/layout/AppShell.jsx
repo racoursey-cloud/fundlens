@@ -5,6 +5,7 @@ import { SEED, getTierFromModZ } from '../../engine/constants.js';
 import PipelineOverlay from '../shared/PipelineOverlay.jsx';
 import DataQualityBanner from '../shared/DataQualityBanner.jsx';
 import ThesisTab from '../thesis/ThesisTab.jsx';
+import PortfolioTab from '../PortfolioTab.jsx';
 
 const TABS = [
   { id:'rank', label:'Rankings' }, { id:'thesis', label:'Investment Case' },
@@ -55,7 +56,7 @@ export default function AppShell({ userFunds, profile }) {
         <DataQualityBanner />
         {activeTab==='rank' && <RankingsPlaceholder funds={displayFunds} source={source} />}
         {activeTab==='thesis' && <ThesisTab />}
-        {activeTab==='portfolio' && <Placeholder icon={'\uD83D\uDCBC'} title="Portfolio Allocation" msg="Run Analysis to build a risk-adjusted allocation." />}
+        {activeTab==='portfolio' && <PortfolioTab />}
         {activeTab==='holdings' && <Placeholder icon={'\uD83D\uDCC2'} title="Fund Holdings" msg="Run Analysis to load holdings from SEC EDGAR." />}
         {activeTab==='matrix' && <Placeholder icon={'\u26A1'} title="Factor Matrix" msg="Run Analysis to see all 4 factors side by side." />}
         {activeTab==='history' && <Placeholder icon={'\uD83D\uDCCA'} title="Run History" msg="Your past analysis runs will appear here." />}
