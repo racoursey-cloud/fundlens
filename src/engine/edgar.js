@@ -25,57 +25,81 @@
 
 import { CLAUDE_MODEL, MONEY_MARKET_FUNDS, GICS_SECTORS } from './constants.js';
 import { getHoldings, setHoldings, getSectorMapping, setSectorMapping } from '../services/cache.js';
-import { fetchEdgar, fetchEfts, fetchSEC } from '../services/api.js';
+import { fetchEdgar, fetchSEC } from '../services/api.js';
 
 const SECTOR_BATCH_SIZE  = 20;  // Max tickers sent to Claude per sector request
-const MIN_EQUITY_WEIGHT  = 0.1; // % — skip sector lookup for tiny equity positions
+const MIN_EQUITY_WEIGHT  = 0.1; // % -- skip sector lookup for tiny equity positions
 
-// ── CIK lookup ────────────────────────────────────────────────────────────────
-// Resolve a mutual fund ticker to its SEC CIK number.
-// Primary: EFTS full-text search (efts.sec.gov).
-// Fallback: www.sec.gov browse-edgar Atom feed (stable, decades-old endpoint).
-// EFTS has been returning 403 from Railway IPs since ~March 2026.
-async function getCik(ticker) {
-  // ── Attempt 1: EFTS full-text search ──────────────────────────────────────
-  try {
-    const data = await fetchEfts('/hits.json', {
-      q:        `"${ticker}"`,
-      dateRange: 'custom',
-      startdt:  '2020-01-01',
-      forms:    'NPORT-P',
-    });
+// -- SEC rate limiter ---------------------------------------------------------
+// SEC blocks IPs that make too many concurrent requests. This simple queue
+// ensures at most 2 SEC requests in flight at once, with a 600ms gap between.
+let secQueue = Promise.resolve();
+function throttledSecRequest(fn) {
+  secQueue = secQueue.then(() =>
+    fn().finally(() => new Promise(r => setTimeout(r, 600)))
+  );
+  return secQueue;
+}
 
-    const hits = data?.hits?.hits ?? [];
-    for (const hit of hits) {
-      const filingCik = hit._source?.period_of_report
-        ? hit._id?.split('-')[0]?.replace(/^0+/, '')
-        : null;
-      if (filingCik) return filingCik;
+// -- company_tickers_mf.json cache -------------------------------------------
+// Single fetch from SEC, cached for the lifetime of the page session.
+// Maps ticker -> CIK for all registered mutual funds (~15k entries).
+// Eliminates the need for per-ticker EFTS lookups (which were 403-blocked).
+let cikMapPromise = null;
+
+async function loadCikMap() {
+  if (cikMapPromise) return cikMapPromise;
+  cikMapPromise = (async () => {
+    try {
+      const data = await fetchSEC('/files/company_tickers_mf.json');
+      const parsed = typeof data === 'string' ? JSON.parse(data) : data;
+      const map = new Map();
+      // Format: { "0": { "cik": 1234, "seriesId": "S000...", "classId": "C000...", "symbol": "FXAIX" }, ... }
+      const entries = parsed?.data ?? Object.values(parsed);
+      for (const entry of entries) {
+        const sym = (entry.symbol || '').toUpperCase().trim();
+        if (sym && entry.cik) {
+          map.set(sym, String(entry.cik));
+        }
+      }
+      console.log(`[edgar] Loaded CIK map: ${map.size} mutual fund tickers`);
+      return map;
+    } catch (err) {
+      console.warn('[edgar] Failed to load company_tickers_mf.json:', err.message);
+      return new Map();
     }
-  } catch (err) {
-    console.warn(`[edgar] EFTS lookup failed for ${ticker} (${err.message}), trying browse-edgar fallback`);
-  }
+  })();
+  return cikMapPromise;
+}
 
-  // ── Attempt 2: www.sec.gov browse-edgar Atom feed ─────────────────────────
-  // Put the ticker in the CIK field -- SEC resolves ticker to CIK automatically.
-  // Returns Atom XML with <cik> tag containing the numeric CIK.
+// -- CIK lookup ---------------------------------------------------------------
+// Primary: company_tickers_mf.json (single fetch, cached for session).
+// Fallback: browse-edgar Atom feed (one request per ticker, throttled).
+// EFTS full-text search removed -- returns 403 from Railway IPs since Mar 2026.
+async function getCik(ticker) {
+  // Attempt 1: cached CIK map (covers ~15k mutual fund tickers)
+  const cikMap = await loadCikMap();
+  const mapped = cikMap.get(ticker.toUpperCase());
+  if (mapped) return mapped;
+
+  // Attempt 2: browse-edgar Atom feed (throttled to avoid WAF)
   try {
-    const xml = await fetchSEC(
-      `/cgi-bin/browse-edgar?action=getcompany&CIK=${encodeURIComponent(ticker)}&type=NPORT-P&dateb=&owner=include&count=1&search_text=&output=atom`
+    const xml = await throttledSecRequest(() =>
+      fetchSEC(
+        `/cgi-bin/browse-edgar?action=getcompany&CIK=${encodeURIComponent(ticker)}&type=NPORT-P&dateb=&owner=include&count=1&search_text=&output=atom`
+      )
     );
 
-    // Extract CIK from <cik> element in the Atom response
     const cikMatch = xml.match(/<cik[^>]*>0*(\d+)<\/cik>/i);
     if (cikMatch) return cikMatch[1];
 
-    // Fallback: CIK sometimes appears in link URLs as CIK=0001234567
     const linkMatch = xml.match(/CIK=0*(\d+)/);
     if (linkMatch) return linkMatch[1];
   } catch (err) {
-    console.warn(`[edgar] browse-edgar fallback also failed for ${ticker}:`, err.message);
+    console.warn(`[edgar] browse-edgar fallback failed for ${ticker}:`, err.message);
   }
 
-  console.warn(`[edgar] Could not resolve CIK for ${ticker} via any method`);
+  console.warn(`[edgar] Could not resolve CIK for ${ticker}`);
   return null;
 }
 
@@ -83,7 +107,9 @@ async function getCik(ticker) {
 // Given a CIK, find the most recent NPORT-P filing accession number.
 async function getLatestNportAccession(cik) {
   try {
-    const data = await fetchEdgar(`/submissions/CIK${cik.padStart(10, '0')}.json`);
+    const data = await throttledSecRequest(() =>
+      fetchEdgar(`/submissions/CIK${cik.padStart(10, '0')}.json`)
+    );
     const filings = data?.filings?.recent;
     if (!filings) return null;
 
@@ -270,8 +296,10 @@ export async function fetchHoldings(ticker, fundName) {
   let holdings = [];
   try {
     const accessionClean = accession.replace(/-/g, '');
-    const nportData = await fetchEdgar(
-      `/archives/${cik.padStart(10, '0')}/${accessionClean}/xbrl_data.json`
+    const nportData = await throttledSecRequest(() =>
+      fetchEdgar(
+        `/archives/${cik.padStart(10, '0')}/${accessionClean}/xbrl_data.json`
+      )
     );
 
     // Extract total NAV for weight calculation
