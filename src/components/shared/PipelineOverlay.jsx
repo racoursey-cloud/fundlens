@@ -19,7 +19,7 @@ export default function PipelineOverlay() {
 
   if (!loading) return null;
 
-  const stepLabel   = STEP_LABELS[pipelineStep] ?? 'Initializing…';
+  const stepLabel   = STEP_LABELS[pipelineStep] ?? 'Initializing\u2026';
   const displayStep = Math.min(Math.max(pipelineStep, 1), TOTAL_STEPS);
   const pct         = Math.round((displayStep / TOTAL_STEPS) * 100);
 
@@ -48,7 +48,7 @@ export default function PipelineOverlay() {
             className="text-lg font-semibold tracking-tight text-white"
             style={{ fontFamily: 'Inter, sans-serif' }}
           >
-            Analyzing your funds…
+            Analyzing your funds{'\u2026'}
           </span>
         </div>
 
