@@ -451,22 +451,23 @@ export default function PortfolioTab() {
           <input
             type="range"
             min={1}
-            max={10}
+            max={9}
             value={riskTolerance}
             onChange={e => handleRiskChange(Number(e.target.value))}
             style={{ width: '100%', accentColor: T.accent }}
           />
           <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, color: T.textMuted }}>
             <span>Conservative — spread evenly</span>
-            <span>Aggressive — concentrate in leaders</span>
+            <span>Aggressive — tilt toward leaders (30% cap)</span>
           </div>
           <div style={{
             marginTop: 8, padding: 16, borderRadius: 8,
             background: T.accentDim, fontSize: 12, lineHeight: 1.6, color: T.textMuted,
           }}>
             <strong style={{ color: T.text }}>How this works:</strong> Risk tolerance controls how
-            aggressively allocation concentrates in top-scoring funds. At 1, qualifying funds
-            get nearly equal weight. At 10, the highest-scoring funds dominate. Only funds
+            aggressively allocation tilts toward top-scoring funds. At 1, qualifying funds
+            get nearly equal weight. At 10, the best funds get the largest share — but no
+            single fund exceeds 30% (standard 401K diversification practice). Only funds
             above the median with sufficient data quality receive any allocation.
           </div>
         </div>
