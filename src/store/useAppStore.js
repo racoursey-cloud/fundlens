@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { DEFAULT_WEIGHTS, MONEY_MARKET_FUNDS } from '../engine/constants.js';
 import { runPipeline as runPipelineEngine }    from '../engine/pipeline.js';
+import { computeOutliersAndAllocation }        from '../engine/outlier.js';
 
 export const useAppStore = create((set, get) => ({
   // ── Existing state (unchanged) ──────────────────────────────────────────────
@@ -55,6 +56,7 @@ export const useAppStore = create((set, get) => ({
     const weights        = state.getWeights();
     const userId         = state.user?.id;
     const dataSourcePrefs = state.dataSourcePrefs;
+    const riskTolerance  = state.getRiskTolerance();
 
     set({ loading: true, pipelineStep: 0, pipelineDetail: '', errors: [] });
 
@@ -65,6 +67,7 @@ export const useAppStore = create((set, get) => ({
         userId,
         dataSourcePrefs,
         (step, detail) => set({ pipelineStep: step, pipelineDetail: detail }),
+        riskTolerance,
       );
 
       set({
@@ -135,10 +138,14 @@ export const useAppStore = create((set, get) => ({
     // Re-sort by composite descending
     updatedFunds.sort((a, b) => b.composite - a.composite);
 
+    // Re-run outlier detection + allocation with new composites
+    const riskTolerance = get().getRiskTolerance();
+    const enrichedFunds = computeOutliersAndAllocation(updatedFunds, riskTolerance);
+
     // Merge new weights into userWeights using the DB snake_case keys so
     // getWeights() continues to work correctly on next read.
     set({
-      funds: updatedFunds,
+      funds: enrichedFunds,
       userWeights: {
         ...get().userWeights,
         mandate_score:   newWeights.mandateScore,
