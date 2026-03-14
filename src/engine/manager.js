@@ -80,6 +80,21 @@ function buildManagerPrompt(fund, expenseData) {
   lines.push('  "confidence": "<high | medium | low>"');
   lines.push('}');
   lines.push('');
+  lines.push('Score guidance (USE THE FULL 1-10 RANGE):');
+  lines.push('  9-10: Elite — top-tier fund family (Vanguard, Fidelity, PIMCO), long-tenured');
+  lines.push('        PMs with strong track records, low fees, excellent stewardship.');
+  lines.push('  7-8:  Strong — reputable organization, experienced management, competitive fees.');
+  lines.push('  5-6:  Average — adequate management, no red flags but nothing distinctive.');
+  lines.push('  3-4:  Below average — high fees, short PM tenure, organizational concerns,');
+  lines.push('        or limited transparency.');
+  lines.push('  1-2:  Poor — significant red flags: regulatory issues, excessive fees,');
+  lines.push('        revolving-door management, AUM collapse, or known controversies.');
+  lines.push('');
+  lines.push('CRITICAL: A Vanguard index fund and an obscure boutique fund with no track');
+  lines.push('record CANNOT both score 5-6. Differentiate based on what you actually know');
+  lines.push('about the fund family and management. If you know the firm well, score');
+  lines.push('decisively. If you know little, score conservatively AND set confidence=low.');
+  lines.push('');
   lines.push('confidence guidance:');
   lines.push('  high   -- well-known fund family, strong data, clear track record');
   lines.push('  medium -- some knowledge gaps or ambiguous signals');
@@ -119,6 +134,7 @@ async function scoreOneFund(fund, expenseData) {
         body: JSON.stringify({
           model:      CLAUDE_MODEL,
           max_tokens: MANAGER_MAX_TOKENS,
+          system:     'You are a fund analyst evaluating management quality. You are decisive and use the full 1-10 scale. Well-known fund families with strong reputations score high. Unknown or problematic managers score low. You never default to the midpoint. You respond with only valid JSON.',
           messages:   [{ role: 'user', content: prompt }],
         }),
       });
