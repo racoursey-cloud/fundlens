@@ -135,6 +135,22 @@ Consider:
 - Do the fund's top sector exposures benefit or face headwinds in this environment?
 - Are the headlines consistent with or contradicting the FRED picture?
 
+Score guidance (USE THE FULL 1-10 RANGE):
+  9-10: Strategy is exceptionally aligned — sector exposures directly benefit
+        from current macro conditions (e.g. short-duration bonds when rates peak,
+        energy stocks during an oil supply shock).
+  7-8:  Clear tailwinds — most holdings benefit, few face headwinds.
+  5-6:  Mixed or neutral — some exposures help, some hurt, net effect unclear.
+  3-4:  Notable headwinds — key sector exposures face challenges in this environment.
+  1-2:  Severely misaligned — the fund's strategy is the opposite of what current
+        conditions favor (e.g. long-duration bonds when rates are rising sharply,
+        growth tech during a liquidity crunch).
+
+CRITICAL: Different fund types MUST receive different scores. A short-term
+government bond fund and a global equity fund cannot both score 5-6 unless
+macro conditions are genuinely neutral for both. Differentiate aggressively
+based on how each fund's SPECIFIC holdings interact with the macro data above.
+
 Respond ONLY with valid JSON in this exact format:
 {
   "score": <number 1.0-10.0, one decimal place>,
@@ -157,6 +173,7 @@ async function scoreFund(macroContext, fund) {
         body: JSON.stringify({
           model:      CLAUDE_MODEL,
           max_tokens: MANDATE_MAX_TOKENS,
+          system:     'You are a senior macro strategist scoring fund-to-macro alignment. You are decisive and use the full 1-10 scale. You never cluster scores near the midpoint when funds have meaningfully different exposures. You respond with only valid JSON.',
           messages:   [{ role: 'user', content: prompt }],
         }),
       });
