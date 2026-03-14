@@ -25,14 +25,18 @@
 
 import { CLAUDE_MODEL, MONEY_MARKET_FUNDS, GICS_SECTORS } from './constants.js';
 import { getHoldings, setHoldings, getSectorMapping, setSectorMapping } from '../services/cache.js';
-import { fetchEdgar, fetchEfts } from '../services/api.js';
+import { fetchEdgar, fetchEfts, fetchSEC } from '../services/api.js';
 
 const SECTOR_BATCH_SIZE  = 20;  // Max tickers sent to Claude per sector request
 const MIN_EQUITY_WEIGHT  = 0.1; // % — skip sector lookup for tiny equity positions
 
 // ── CIK lookup ────────────────────────────────────────────────────────────────
-// Resolve a mutual fund ticker to its SEC CIK number using EFTS full-text search.
+// Resolve a mutual fund ticker to its SEC CIK number.
+// Primary: EFTS full-text search (efts.sec.gov).
+// Fallback: www.sec.gov browse-edgar Atom feed (stable, decades-old endpoint).
+// EFTS has been returning 403 from Railway IPs since ~March 2026.
 async function getCik(ticker) {
+  // ── Attempt 1: EFTS full-text search ──────────────────────────────────────
   try {
     const data = await fetchEfts('/hits.json', {
       q:        `"${ticker}"`,
@@ -43,29 +47,36 @@ async function getCik(ticker) {
 
     const hits = data?.hits?.hits ?? [];
     for (const hit of hits) {
-      const entity = hit._source?.entity_name ?? '';
-      const cik    = hit._source?.file_num
-        ? null
-        : (hit._source?.period_of_report ? hit._id?.split('-')[0] : null);
-
-      // EFTS hit structure: _id is accession number, entity_name is filer
-      // Pull CIK from the submissions endpoint instead
       const filingCik = hit._source?.period_of_report
         ? hit._id?.split('-')[0]?.replace(/^0+/, '')
         : null;
-
       if (filingCik) return filingCik;
     }
-
-    // Fallback: search submissions directly
-    const search = await fetchEdgar(`/submissions/?action=getcompany&company=${encodeURIComponent(ticker)}&type=NPORT-P&dateb=&owner=include&count=5&search_text=&output=atom`);
-    // submissions search returns XML; extract CIK from first result
-    const match = JSON.stringify(search).match(/"cik":"?(\d+)"?/);
-    return match ? match[1].replace(/^0+/, '') : null;
   } catch (err) {
-    console.warn(`[edgar] CIK lookup failed for ${ticker}:`, err.message);
-    return null;
+    console.warn(`[edgar] EFTS lookup failed for ${ticker} (${err.message}), trying browse-edgar fallback`);
   }
+
+  // ── Attempt 2: www.sec.gov browse-edgar Atom feed ─────────────────────────
+  // Put the ticker in the CIK field -- SEC resolves ticker to CIK automatically.
+  // Returns Atom XML with <cik> tag containing the numeric CIK.
+  try {
+    const xml = await fetchSEC(
+      `/cgi-bin/browse-edgar?action=getcompany&CIK=${encodeURIComponent(ticker)}&type=NPORT-P&dateb=&owner=include&count=1&search_text=&output=atom`
+    );
+
+    // Extract CIK from <cik> element in the Atom response
+    const cikMatch = xml.match(/<cik[^>]*>0*(\d+)<\/cik>/i);
+    if (cikMatch) return cikMatch[1];
+
+    // Fallback: CIK sometimes appears in link URLs as CIK=0001234567
+    const linkMatch = xml.match(/CIK=0*(\d+)/);
+    if (linkMatch) return linkMatch[1];
+  } catch (err) {
+    console.warn(`[edgar] browse-edgar fallback also failed for ${ticker}:`, err.message);
+  }
+
+  console.warn(`[edgar] Could not resolve CIK for ${ticker} via any method`);
+  return null;
 }
 
 // ── Latest NPORT-P accession ──────────────────────────────────────────────────
