@@ -13,6 +13,26 @@ function withTimeout(promise, ms, fallback) {
   ]);
 }
 
+// ── Supabase proxy query ──────────────────────────────────────────────────────
+// Routes through /api/supabase (Railway proxy injects the service_role key).
+// This bypasses RLS entirely and does NOT depend on the Supabase JS client's
+// auth state. The old code used supabase.from(...) which attaches the user's
+// JWT — on page reload that JWT is often expired and waiting for a background
+// refresh, causing queries to hang until the 8s timeout fired. By the time
+// onAuthStateChange refreshed the token, the app had already routed to the
+// wizard because userFunds was [].
+async function proxyQuery(path) {
+  const res = await fetch(`/api/supabase${path}`, {
+    headers: { 'Content-Type': 'application/json' },
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new Error(`Supabase proxy ${res.status}: ${text.slice(0, 200)}`);
+  }
+  if (res.status === 204) return null;
+  return res.json();
+}
+
 export default function App() {
   const setUser        = useAppStore(s => s.setUser);
   const setProfile     = useAppStore(s => s.setProfile);
@@ -26,40 +46,47 @@ export default function App() {
   const [dataLoading, setDataLoading] = useState(false);
   const [authError,   setAuthError]   = useState(null);
 
+  // Load user data via the /api/supabase proxy (service_role key, bypasses RLS).
+  // This is the same path every engine file uses via supaFetch() in cache.js.
+  // The Supabase JS client is ONLY used for auth — never for table queries.
   const loadUserData = async (userId) => {
     setDataLoading(true);
     try {
-      // Run each query individually with logging so we can see which one hangs
-      console.log('[App] loadUserData: fetching profiles...');
-      const profileRes = await withTimeout(
-        supabase.from('profiles').select('*').eq('id', userId).maybeSingle(),
-        8000,
-        { data: null, error: { message: 'profiles query timed out' } }
-      );
-      if (profileRes.error) console.warn('[App] profiles error:', profileRes.error.message);
-      else console.log('[App] profiles OK');
+      const uid = encodeURIComponent(userId);
 
-      console.log('[App] loadUserData: fetching user_funds...');
-      const fundsRes = await withTimeout(
-        supabase.from('user_funds').select('*').eq('user_id', userId).order('sort_order'),
-        8000,
-        { data: [], error: { message: 'user_funds query timed out' } }
+      console.log('[App] loadUserData: fetching profiles via proxy...');
+      const profileRows = await withTimeout(
+        proxyQuery(`/profiles?id=eq.${uid}&limit=1`),
+        15000,
+        null
       );
-      if (fundsRes.error) console.warn('[App] user_funds error:', fundsRes.error.message);
-      else console.log('[App] user_funds OK:', (fundsRes.data || []).length, 'rows');
+      const profileData = Array.isArray(profileRows) && profileRows.length > 0
+        ? profileRows[0]
+        : null;
+      console.log('[App] profiles:', profileData ? 'OK' : 'empty');
 
-      console.log('[App] loadUserData: fetching user_weights...');
-      const weightsRes = await withTimeout(
-        supabase.from('user_weights').select('*').eq('user_id', userId).maybeSingle(),
-        8000,
-        { data: null, error: { message: 'user_weights query timed out' } }
+      console.log('[App] loadUserData: fetching user_funds via proxy...');
+      const fundsRows = await withTimeout(
+        proxyQuery(`/user_funds?user_id=eq.${uid}&order=sort_order`),
+        15000,
+        []
       );
-      if (weightsRes.error) console.warn('[App] user_weights error:', weightsRes.error.message);
-      else console.log('[App] user_weights OK');
+      console.log('[App] user_funds:', (fundsRows || []).length, 'rows');
 
-      setProfile(profileRes.data   || null);
-      setUserFunds(fundsRes.data   || []);
-      setUserWeights(weightsRes.data || null);
+      console.log('[App] loadUserData: fetching user_weights via proxy...');
+      const weightsRows = await withTimeout(
+        proxyQuery(`/user_weights?user_id=eq.${uid}&limit=1`),
+        15000,
+        null
+      );
+      const weightsData = Array.isArray(weightsRows) && weightsRows.length > 0
+        ? weightsRows[0]
+        : null;
+      console.log('[App] user_weights:', weightsData ? 'OK' : 'empty');
+
+      setProfile(profileData);
+      setUserFunds(fundsRows || []);
+      setUserWeights(weightsData);
     } catch (e) {
       console.error('[App] loadUserData error:', e);
     }
@@ -78,11 +105,14 @@ export default function App() {
       return;
     }
 
-    // Normal session boot — 5s timeout so the app never hangs
+    // Normal session boot — 10s timeout so the app never hangs.
+    // getSession() reads from localStorage first so it usually resolves fast,
+    // but on slow networks the token-refresh round-trip can take a few seconds.
+    // The old 5s timeout was too tight and caused false negatives on Railway.
     console.log('[App] Calling getSession...');
     const TIMEOUT_FALLBACK = { data: { session: null } };
 
-    withTimeout(supabase.auth.getSession(), 5000, TIMEOUT_FALLBACK)
+    withTimeout(supabase.auth.getSession(), 10000, TIMEOUT_FALLBACK)
       .then(async ({ data: { session: s } }) => {
         console.log('[App] getSession resolved, session:', s ? 'YES' : 'NO');
         setSession(s);
