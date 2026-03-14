@@ -1,24 +1,25 @@
-// FundLens v4 \u2014 Expense ratio engine (pure math \u2014 no Claude calls)
-// Classifies fund type from EDGAR holdings, looks up expense ratio from
-// cache or a static map of known 401(k) funds, and returns a \u00b10.5
-// net-value modifier for use in scoring.js.
+// FundLens v4 — Expense ratio engine (Finnhub + static fallback, no Claude)
+// Fetches expense ratio from Finnhub's mutual fund profile endpoint, caches
+// in Supabase for 90 days, and falls back to a static map of known 401(k)
+// funds if Finnhub doesn't cover the ticker.
 //
 // Architecture notes:
 // - Fund type derived programmatically from EDGAR holdings (assetCat
 //   distribution + name pattern matching). No AI involved.
-// - Expense ratios sourced from: (1) Supabase cache (fund_profiles, 90-day TTL),
-//   then (2) static KNOWN_RATIOS map of common 401(k) funds (public prospectus data).
-// - If neither source has data, modifier is 0 (neutral) \u2014 never penalizes.
-// - Zero API calls. Step 5 completes in milliseconds.
+// - Lookup chain: Supabase cache (90-day TTL) -> Finnhub API -> static map -> neutral.
+// - Finnhub free tier = 60 calls/min. With 90-day caching, a typical 20-fund
+//   portfolio hits Finnhub at most once per fund per quarter. Repeat runs
+//   within 90 days are instant (cache only).
+// - Zero Claude calls. Step 5 completes in seconds.
 // - Benchmark vintage warning: emits console.warn if ICI/Morningstar thresholds
-//   in constants.js are \u22652 years old.
+//   in constants.js are >=2 years old.
 //
-// !! SEQUENTIAL CLAUDE CALL RULE: NOT APPLICABLE \u2014 this file makes zero Claude calls. !!
+// !! NO CLAUDE CALLS IN THIS FILE -- sequential call rule does not apply. !!
 
 import { EXPENSE_BENCHMARKS_VINTAGE, EXPENSE_RATIO_THRESHOLDS, MONEY_MARKET_FUNDS } from './constants.js';
 import { getFundProfile, setFundProfile } from '../services/cache.js';
 
-// \u2500\u2500 Benchmark vintage check \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+// -- Benchmark vintage check --------------------------------------------------
 const vintageAge = new Date().getFullYear() - EXPENSE_BENCHMARKS_VINTAGE;
 if (vintageAge >= 2) {
   console.warn(
@@ -27,132 +28,130 @@ if (vintageAge >= 2) {
   );
 }
 
-// \u2500\u2500 Known 401(k) fund expense ratios \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
-// Source: fund prospectuses (public data, updated periodically).
-// Values are NET expense ratio as a decimal (e.g. 0.0003 = 0.03%).
-// To add a fund: KNOWN_RATIOS.set('TICKER', { net: 0.0045, gross: 0.0050 })
-//
-// Coverage: ~80 of the most common 401(k) funds across Fidelity, Vanguard,
-// T. Rowe Price, American Funds, BlackRock/iShares, Schwab, PIMCO, JPMorgan,
-// and other major providers.
+// -- Finnhub expense ratio fetch ----------------------------------------------
+// Calls /api/finnhub/mutual-fund/profile?symbol=TICKER (Railway proxy injects token).
+// Finnhub returns: { name, category, expenseRatio, ... }
+// expenseRatio is a percentage value (e.g. 0.75 means 0.75%).
+// We convert to decimal (0.75% -> 0.0075) for consistency with our thresholds.
+async function fetchExpenseFromFinnhub(ticker) {
+  try {
+    const res = await fetch(
+      `/api/finnhub/mutual-fund/profile?symbol=${encodeURIComponent(ticker)}`
+    );
+
+    if (res.status === 429) {
+      console.warn(`[expenses] Finnhub rate-limited on ${ticker}, skipping`);
+      return null;
+    }
+
+    if (!res.ok) {
+      console.warn(`[expenses] Finnhub ${res.status} for ${ticker}`);
+      return null;
+    }
+
+    const data = await res.json();
+
+    // Finnhub returns {} for unknown tickers
+    if (!data || typeof data.expenseRatio !== 'number') {
+      console.log(`[expenses] Finnhub has no expense data for ${ticker}`);
+      return null;
+    }
+
+    // Finnhub expenseRatio is a percentage (e.g. 0.75 = 0.75%).
+    // Convert to decimal (0.75% -> 0.0075) to match our threshold format.
+    const ratioDecimal = data.expenseRatio / 100;
+
+    return {
+      gross: ratioDecimal,
+      net:   ratioDecimal,  // Finnhub doesn't distinguish gross/net
+      note:  data.category ? `Category: ${data.category}` : '',
+    };
+  } catch (err) {
+    console.warn(`[expenses] Finnhub fetch failed for ${ticker}:`, err.message);
+    return null;
+  }
+}
+
+// -- Static fallback map of known 401(k) fund expense ratios ------------------
+// Source: fund prospectuses (public data). Values are NET expense ratio as a
+// decimal (e.g. 0.0003 = 0.03%). Used only when both Supabase cache and
+// Finnhub miss.
 const KNOWN_RATIOS = new Map([
-  // ---- Fidelity index funds ----
-  ['FXAIX',  { net: 0.0015, gross: 0.0015 }],  // 500 Index
-  ['FSKAX',  { net: 0.0015, gross: 0.0015 }],  // Total Market Index
-  ['FTIHX',  { net: 0.0006, gross: 0.0006 }],  // Total Intl Index
-  ['FXNAX',  { net: 0.0025, gross: 0.0025 }],  // US Bond Index
-  ['FSMDX',  { net: 0.0025, gross: 0.0025 }],  // Mid Cap Index
-  ['FSSNX',  { net: 0.0025, gross: 0.0025 }],  // Small Cap Index
-  ['FSPSX',  { net: 0.0035, gross: 0.0035 }],  // Intl Index
-  ['FIPDX',  { net: 0.0005, gross: 0.0005 }],  // Inflation-Protected Bond Index
-
-  // ---- Fidelity active funds ----
-  ['FCNTX',  { net: 0.0049, gross: 0.0049 }],  // Contrafund
-  ['FDGRX',  { net: 0.0083, gross: 0.0083 }],  // Growth Company
-  ['FBGRX',  { net: 0.0079, gross: 0.0079 }],  // Blue Chip Growth
-  ['FLCSX',  { net: 0.0068, gross: 0.0068 }],  // Large Cap Stock
-  ['FBALX',  { net: 0.0049, gross: 0.0049 }],  // Balanced
-  ['FPURX',  { net: 0.0049, gross: 0.0049 }],  // Puritan
-  ['FMILX',  { net: 0.0046, gross: 0.0046 }],  // New Millennium
-  ['FOCPX',  { net: 0.0069, gross: 0.0069 }],  // OTC Portfolio
-  ['FLPSX',  { net: 0.0052, gross: 0.0052 }],  // Low-Priced Stock
-  ['FSCOX',  { net: 0.0081, gross: 0.0081 }],  // Small Cap Opportunities
-
-  // ---- Fidelity Freedom target-date ----
-  ['FFFHX',  { net: 0.0075, gross: 0.0075 }],  // Freedom 2030
-  ['FFFGX',  { net: 0.0075, gross: 0.0075 }],  // Freedom 2040
-  ['FFFEX',  { net: 0.0075, gross: 0.0075 }],  // Freedom 2025
-  ['FFFSX',  { net: 0.0065, gross: 0.0065 }],  // Freedom Income
-
-  // ---- Fidelity Freedom Index target-date ----
-  ['FIHFX',  { net: 0.0012, gross: 0.0012 }],  // Freedom Idx 2030
-  ['FBIFX',  { net: 0.0012, gross: 0.0012 }],  // Freedom Idx 2040
-  ['FIOFX',  { net: 0.0012, gross: 0.0012 }],  // Freedom Idx 2025
-
-  // ---- Fidelity money market / stable value ----
-  ['FDRXX',  { net: 0.0042, gross: 0.0042 }],  // Gov Money Market
-  ['SPAXX',  { net: 0.0042, gross: 0.0042 }],  // Gov Money Market
-  ['FRTXX',  { net: 0.0042, gross: 0.0042 }],  // Treasury Money Market
-
-  // ---- Vanguard index funds ----
-  ['VFIAX',  { net: 0.0004, gross: 0.0004 }],  // 500 Index Admiral
-  ['VTSAX',  { net: 0.0004, gross: 0.0004 }],  // Total Stock Market Admiral
-  ['VTIAX',  { net: 0.0012, gross: 0.0012 }],  // Total Intl Stock Admiral
-  ['VBTLX',  { net: 0.0005, gross: 0.0005 }],  // Total Bond Market Admiral
-  ['VSMAX',  { net: 0.0005, gross: 0.0005 }],  // Small Cap Index Admiral
-  ['VIMAX',  { net: 0.0005, gross: 0.0005 }],  // Mid Cap Index Admiral
-  ['VGSLX',  { net: 0.0012, gross: 0.0012 }],  // Real Estate Index Admiral
-  ['VEMAX',  { net: 0.0014, gross: 0.0014 }],  // Emerging Mkts Index Admiral
-  ['VTABX',  { net: 0.0011, gross: 0.0011 }],  // Total Intl Bond Admiral
-  ['VIPSX',  { net: 0.0010, gross: 0.0010 }],  // Inflation-Protected Secs Admiral
-  ['VEXAX',  { net: 0.0005, gross: 0.0005 }],  // Extended Market Index Admiral
-
-  // ---- Vanguard active funds ----
-  ['VWELX',  { net: 0.0026, gross: 0.0026 }],  // Wellington
-  ['VWNAX',  { net: 0.0027, gross: 0.0027 }],  // Windsor II Admiral
-  ['VPMAX',  { net: 0.0030, gross: 0.0030 }],  // Primecap Admiral
-  ['VHCAX',  { net: 0.0032, gross: 0.0032 }],  // Health Care Admiral
-  ['VDIGX',  { net: 0.0017, gross: 0.0017 }],  // Dividend Growth
-
-  // ---- Vanguard target-date ----
-  ['VTTHX',  { net: 0.0008, gross: 0.0008 }],  // Target Retirement 2030
-  ['VFORX',  { net: 0.0008, gross: 0.0008 }],  // Target Retirement 2040
-  ['VTTVX',  { net: 0.0008, gross: 0.0008 }],  // Target Retirement 2025
-  ['VTINX',  { net: 0.0008, gross: 0.0008 }],  // Target Retirement Income
-
-  // ---- T. Rowe Price ----
-  ['TRBCX',  { net: 0.0070, gross: 0.0070 }],  // Blue Chip Growth
-  ['PRGFX',  { net: 0.0065, gross: 0.0065 }],  // Growth Stock
-  ['PRWCX',  { net: 0.0060, gross: 0.0060 }],  // Capital Appreciation
-  ['PRHSX',  { net: 0.0073, gross: 0.0073 }],  // Health Sciences
-  ['RPMGX',  { net: 0.0065, gross: 0.0065 }],  // Mid-Cap Growth
-  ['TRSSX',  { net: 0.0046, gross: 0.0046 }],  // Small Cap Stock
-
-  // ---- American Funds ----
-  ['AGTHX',  { net: 0.0062, gross: 0.0062 }],  // Growth Fund of America
-  ['AIVSX',  { net: 0.0059, gross: 0.0059 }],  // Investment Co of America
-  ['ANCFX',  { net: 0.0062, gross: 0.0062 }],  // Fundamental Investors
-  ['ANWPX',  { net: 0.0074, gross: 0.0074 }],  // New Perspective
-  ['ABALX',  { net: 0.0059, gross: 0.0059 }],  // American Balanced
-  ['CWGIX',  { net: 0.0078, gross: 0.0078 }],  // Capital World Growth & Income
-  ['CAIBX',  { net: 0.0061, gross: 0.0061 }],  // Capital Income Builder
-  ['AMECX',  { net: 0.0065, gross: 0.0065 }],  // Income Fund of America
-  ['AEPGX',  { net: 0.0083, gross: 0.0083 }],  // EuroPacific Growth
-
-  // ---- BlackRock / iShares ----
-  ['MALOX',  { net: 0.0027, gross: 0.0027 }],  // LifePath Index 2030
-  ['LIHOX',  { net: 0.0027, gross: 0.0027 }],  // LifePath Index 2040
-  ['LIPOX',  { net: 0.0027, gross: 0.0027 }],  // LifePath Index 2025
-
-  // ---- Schwab ----
-  ['SWPPX',  { net: 0.0002, gross: 0.0002 }],  // S&P 500 Index
-  ['SWTSX',  { net: 0.0003, gross: 0.0003 }],  // Total Stock Market Index
-  ['SWISX',  { net: 0.0006, gross: 0.0006 }],  // Intl Index
-  ['SWAGX',  { net: 0.0004, gross: 0.0004 }],  // US Aggregate Bond Index
-
-  // ---- PIMCO ----
-  ['PTTRX',  { net: 0.0050, gross: 0.0050 }],  // Total Return
-  ['PIMIX',  { net: 0.0059, gross: 0.0059 }],  // Income Instl
-  ['PONDX',  { net: 0.0055, gross: 0.0055 }],  // Income D
-
-  // ---- JPMorgan ----
-  ['JLGMX',  { net: 0.0044, gross: 0.0044 }],  // Large Cap Growth
-  ['SEEGX',  { net: 0.0085, gross: 0.0085 }],  // Equity Income
-  ['VSCOX',  { net: 0.0081, gross: 0.0081 }],  // Small Cap Core
-
-  // ---- Dodge & Cox ----
-  ['DODGX',  { net: 0.0051, gross: 0.0051 }],  // Stock Fund
-  ['DODFX',  { net: 0.0062, gross: 0.0062 }],  // International Stock
-  ['DODIX',  { net: 0.0042, gross: 0.0042 }],  // Income Fund
-
-  // ---- MetLife Stable Value (common 401k) ----
-  ['ADAXX',  { net: 0.0040, gross: 0.0040 }],  // placeholder for stable value
+  // Fidelity index
+  ['FXAIX',  { net: 0.0015, gross: 0.0015 }],
+  ['FSKAX',  { net: 0.0015, gross: 0.0015 }],
+  ['FTIHX',  { net: 0.0006, gross: 0.0006 }],
+  ['FXNAX',  { net: 0.0025, gross: 0.0025 }],
+  ['FSMDX',  { net: 0.0025, gross: 0.0025 }],
+  ['FSSNX',  { net: 0.0025, gross: 0.0025 }],
+  ['FSPSX',  { net: 0.0035, gross: 0.0035 }],
+  ['FIPDX',  { net: 0.0005, gross: 0.0005 }],
+  // Fidelity active
+  ['FCNTX',  { net: 0.0049, gross: 0.0049 }],
+  ['FDGRX',  { net: 0.0083, gross: 0.0083 }],
+  ['FBGRX',  { net: 0.0079, gross: 0.0079 }],
+  ['FLCSX',  { net: 0.0068, gross: 0.0068 }],
+  ['FBALX',  { net: 0.0049, gross: 0.0049 }],
+  ['FPURX',  { net: 0.0049, gross: 0.0049 }],
+  ['FOCPX',  { net: 0.0069, gross: 0.0069 }],
+  ['FLPSX',  { net: 0.0052, gross: 0.0052 }],
+  // Fidelity Freedom target-date
+  ['FFFHX',  { net: 0.0075, gross: 0.0075 }],
+  ['FFFGX',  { net: 0.0075, gross: 0.0075 }],
+  ['FFFEX',  { net: 0.0075, gross: 0.0075 }],
+  ['FFFSX',  { net: 0.0065, gross: 0.0065 }],
+  // Fidelity Freedom Index target-date
+  ['FIHFX',  { net: 0.0012, gross: 0.0012 }],
+  ['FBIFX',  { net: 0.0012, gross: 0.0012 }],
+  ['FIOFX',  { net: 0.0012, gross: 0.0012 }],
+  // Fidelity money market
+  ['FDRXX',  { net: 0.0042, gross: 0.0042 }],
+  ['SPAXX',  { net: 0.0042, gross: 0.0042 }],
+  // Vanguard index
+  ['VFIAX',  { net: 0.0004, gross: 0.0004 }],
+  ['VTSAX',  { net: 0.0004, gross: 0.0004 }],
+  ['VTIAX',  { net: 0.0012, gross: 0.0012 }],
+  ['VBTLX',  { net: 0.0005, gross: 0.0005 }],
+  ['VSMAX',  { net: 0.0005, gross: 0.0005 }],
+  ['VIMAX',  { net: 0.0005, gross: 0.0005 }],
+  ['VGSLX',  { net: 0.0012, gross: 0.0012 }],
+  ['VEMAX',  { net: 0.0014, gross: 0.0014 }],
+  ['VEXAX',  { net: 0.0005, gross: 0.0005 }],
+  // Vanguard active
+  ['VWELX',  { net: 0.0026, gross: 0.0026 }],
+  ['VPMAX',  { net: 0.0030, gross: 0.0030 }],
+  ['VDIGX',  { net: 0.0017, gross: 0.0017 }],
+  // Vanguard target-date
+  ['VTTHX',  { net: 0.0008, gross: 0.0008 }],
+  ['VFORX',  { net: 0.0008, gross: 0.0008 }],
+  ['VTTVX',  { net: 0.0008, gross: 0.0008 }],
+  // T. Rowe Price
+  ['TRBCX',  { net: 0.0070, gross: 0.0070 }],
+  ['PRGFX',  { net: 0.0065, gross: 0.0065 }],
+  ['PRWCX',  { net: 0.0060, gross: 0.0060 }],
+  ['PRHSX',  { net: 0.0073, gross: 0.0073 }],
+  // American Funds
+  ['AGTHX',  { net: 0.0062, gross: 0.0062 }],
+  ['AIVSX',  { net: 0.0059, gross: 0.0059 }],
+  ['ANCFX',  { net: 0.0062, gross: 0.0062 }],
+  ['AEPGX',  { net: 0.0083, gross: 0.0083 }],
+  // Schwab
+  ['SWPPX',  { net: 0.0002, gross: 0.0002 }],
+  ['SWTSX',  { net: 0.0003, gross: 0.0003 }],
+  ['SWISX',  { net: 0.0006, gross: 0.0006 }],
+  ['SWAGX',  { net: 0.0004, gross: 0.0004 }],
+  // PIMCO
+  ['PTTRX',  { net: 0.0050, gross: 0.0050 }],
+  ['PIMIX',  { net: 0.0059, gross: 0.0059 }],
+  // Dodge & Cox
+  ['DODGX',  { net: 0.0051, gross: 0.0051 }],
+  ['DODFX',  { net: 0.0062, gross: 0.0062 }],
+  ['DODIX',  { net: 0.0042, gross: 0.0042 }],
+  // Stable value
+  ['ADAXX',  { net: 0.0040, gross: 0.0040 }],
 ]);
 
-// \u2500\u2500 Fund type classification \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
-// Derives fund type from EDGAR holdings assetCat distribution and fund name.
-// Returns one of: 'indexEquity' | 'activeEquity' | 'indexBond' | 'activeBond'
-//               | 'moneyMarket' | 'unknown'
+// -- Fund type classification -------------------------------------------------
 export function classifyFundType(ticker, fundName, holdings) {
   if (MONEY_MARKET_FUNDS.has(ticker)) return 'moneyMarket';
 
@@ -169,14 +168,8 @@ export function classifyFundType(ticker, fundName, holdings) {
   const pct = k => counts[k] / total;
 
   if (pct('STIV') > 0.5) return 'moneyMarket';
-
-  if (pct('DBT') > 0.5) {
-    return isIndexFund(fundName) ? 'indexBond' : 'activeBond';
-  }
-
-  if (pct('EC') > 0.3) {
-    return isIndexFund(fundName) ? 'indexEquity' : 'activeEquity';
-  }
+  if (pct('DBT') > 0.5) return isIndexFund(fundName) ? 'indexBond' : 'activeBond';
+  if (pct('EC') > 0.3) return isIndexFund(fundName) ? 'indexEquity' : 'activeEquity';
 
   return 'unknown';
 }
@@ -188,12 +181,7 @@ function isIndexFund(name) {
           's&p', 'nasdaq', 'dow jones'].some(kw => n.includes(kw));
 }
 
-// \u2500\u2500 Net-value modifier \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
-// Maps expense ratio to a \u00b10.5 modifier using ICI/Morningstar thresholds.
-//   ratio \u2264 cheap                \u2192 +0.5
-//   cheap < ratio < expensive    \u2192 linear +0.5 \u2192 -0.5
-//   ratio \u2265 expensive            \u2192 -0.5
-//   unknown fund type            \u2192 0 (neutral)
+// -- Net-value modifier -------------------------------------------------------
 export function calcExpenseModifier(expenseRatio, fundType) {
   if (expenseRatio == null || fundType === 'unknown') return 0;
 
@@ -209,15 +197,17 @@ export function calcExpenseModifier(expenseRatio, fundType) {
   return Math.round((0.5 - t) * 100) / 100;
 }
 
-// \u2500\u2500 Public entry point \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
-// Same signature and return shape as the original Claude-based version.
+// -- Public entry point -------------------------------------------------------
+// Same signature and return shape as the original version.
+// Lookup chain: Supabase cache (90-day) -> Finnhub API -> static map -> neutral.
+//
 // Returns:
 // {
 //   gross:      number | null,
 //   net:        number | null,
 //   note:       string,
 //   fundType:   string,
-//   modifier:   number,   \u2190 \u00b10.5, applied by scoring.js after weighted sum
+//   modifier:   number,   <- +/-0.5, applied by scoring.js after weighted sum
 //   confidence: string,
 //   fromCache:  boolean,
 // }
@@ -226,18 +216,19 @@ export function calcExpenseModifier(expenseRatio, fundType) {
 export async function fetchExpenseData(ticker, fundName, holdings) {
   const fundType = classifyFundType(ticker, fundName, holdings);
 
-  // 1. Check Supabase cache (fund_profiles table, 90-day TTL)
+  // -- 1. Supabase cache (90-day TTL enforced by getFundProfile) --------------
   try {
     const cached = await getFundProfile(ticker);
     if (cached) {
-      const modifier = calcExpenseModifier(cached.net ?? cached.gross, fundType);
+      const ratio = cached.net ?? cached.gross ?? null;
+      const modifier = calcExpenseModifier(ratio, fundType);
       return {
         gross:      cached.gross      ?? null,
         net:        cached.net        ?? null,
         note:       cached.note       ?? '',
         fundType,
         modifier,
-        confidence: cached.confidence ?? 'low',
+        confidence: 'high',
         fromCache:  true,
       };
     }
@@ -245,18 +236,46 @@ export async function fetchExpenseData(ticker, fundName, holdings) {
     console.warn(`[expenses] Cache read failed for ${ticker}:`, err.message);
   }
 
-  // 2. Look up in static map of known 401(k) funds
+  // -- 2. Finnhub mutual fund profile API -------------------------------------
+  const finnhubResult = await fetchExpenseFromFinnhub(ticker);
+  if (finnhubResult) {
+    const ratio = finnhubResult.net ?? finnhubResult.gross;
+    const modifier = calcExpenseModifier(ratio, fundType);
+
+    // Persist to Supabase cache so future runs skip Finnhub entirely.
+    // Only write columns that exist on fund_profiles: ticker, gross, net, note, fetched_at.
+    try {
+      await setFundProfile(ticker, {
+        gross: finnhubResult.gross,
+        net:   finnhubResult.net,
+        note:  finnhubResult.note,
+      });
+    } catch (err) {
+      console.warn(`[expenses] Cache write failed for ${ticker}:`, err.message);
+    }
+
+    return {
+      gross:      finnhubResult.gross,
+      net:        finnhubResult.net,
+      note:       finnhubResult.note,
+      fundType,
+      modifier,
+      confidence: 'high',
+      fromCache:  false,
+    };
+  }
+
+  // -- 3. Static map fallback -------------------------------------------------
   const known = KNOWN_RATIOS.get(ticker);
   if (known) {
     const modifier = calcExpenseModifier(known.net ?? known.gross, fundType);
 
-    // Persist to Supabase cache so future lookups are even faster
+    // Cache it so we don't re-check Finnhub next run
     try {
       await setFundProfile(ticker, {
-        gross:      known.gross,
-        net:        known.net,
-        note:       '',
-        confidence: 'high',
+        gross: known.gross,
+        net:   known.net,
+        note:  'From static prospectus data',
       });
     } catch (err) {
       console.warn(`[expenses] Cache write failed for ${ticker}:`, err.message);
@@ -265,16 +284,16 @@ export async function fetchExpenseData(ticker, fundName, holdings) {
     return {
       gross:      known.gross,
       net:        known.net,
-      note:       '',
+      note:       'From static prospectus data',
       fundType,
       modifier,
-      confidence: 'high',
+      confidence: 'medium',
       fromCache:  false,
     };
   }
 
-  // 3. No data available \u2014 neutral modifier, no penalty
-  console.log(`[expenses] No expense data for ${ticker} \u2014 using neutral modifier`);
+  // -- 4. No data available -- neutral modifier -------------------------------
+  console.log(`[expenses] No expense data for ${ticker} -- neutral modifier`);
   return {
     gross:      null,
     net:        null,
