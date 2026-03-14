@@ -5,7 +5,7 @@
 // Architecture notes:
 // - Manager scoring and EDGAR holdings start immediately (background tasks)
 //   before Step 1 begins, since both are slow and independent of world data.
-// - World data \u2192 Thesis \u2192 Holdings \u2192 Tiingo \u2192 Expenses \u2192 Manager \u2192 Mandate \u2192 Score
+// - World data \u2192 Thesis \u2192 Holdings \u2192 Tiingo \u2192 Expenses \u2192 Manager \u2192 Mandate \u2192 Score \u2192 Outlier
 // - Every engine call is wrapped in try/catch. Only mandate coverage failure
 //   aborts the pipeline; all other failures degrade gracefully to 5.0 fallback.
 // - Money market funds (FDRXX, ADAXX) skip edgar, tiingo, expenses, mandate
@@ -30,6 +30,7 @@ import { fetchExpenseData }    from './expenses.js';
 import { scoreManagers }       from './manager.js';
 import { scoreMandates }       from './mandate.js';
 import { calcCompositeScore }  from './scoring.js';
+import { computeOutliersAndAllocation } from './outlier.js';
 import { saveRunHistory }      from '../services/cache.js';
 
 // \u2500\u2500 Source enabled helper \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
@@ -47,9 +48,10 @@ function isEnabled(dataSourcePrefs, key) {
  * @param {string} userId
  * @param {Object} dataSourcePrefs  \u2014 { [key]: boolean }; missing keys default to enabled
  * @param {Function} onProgress     \u2014 (step: number, detail: string) => void
+ * @param {number} riskTolerance    \u2014 1\u201310, controls allocation concentration curve
  * @returns {Promise<Object>}       \u2014 full result object (see shape below)
  */
-export async function runPipeline(funds, weights, userId, dataSourcePrefs = {}, onProgress = () => {}) {
+export async function runPipeline(funds, weights, userId, dataSourcePrefs = {}, onProgress = () => {}, riskTolerance = 5) {
   const errors = [];
 
   // Separate non-money-market funds \u2014 only these go through scoring engines
@@ -265,14 +267,21 @@ export async function runPipeline(funds, weights, userId, dataSourcePrefs = {}, 
   // Sort by composite score descending
   scoredFunds.sort((a, b) => b.composite - a.composite);
 
-  // \u2500\u2500 Step 9 \u2014 Save History \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
-  onProgress(9, 'Saving results...');
+  // ── Step 9 — Outlier Detection & Allocation ─────────────────────────────
+  // Pure math — no API calls. Computes Modified Z-Scores, applies median
+  // quality gate + data confidence gate, then exponential allocation curve.
+  onProgress(9, 'Detecting outliers & computing allocation...');
+
+  const enrichedFunds = computeOutliersAndAllocation(scoredFunds, riskTolerance);
+
+  // ── Step 10 — Save History ──────────────────────────────────────────────
+  onProgress(10, 'Saving results...');
 
   // Fire and forget \u2014 do NOT await
   saveRunHistory(userId, {
     dominantTheme: thesisResult.dominantTheme,
     macroStance:   thesisResult.macroStance,
-    fundScores:    scoredFunds.map(f => ({ ticker: f.ticker, composite: f.composite })),
+    fundScores:    enrichedFunds.map(f => ({ ticker: f.ticker, composite: f.composite, allocPct: f.allocPct })),
     sectorScores:  thesisResult.sectorScores,
   }).catch(err => {
     console.warn('pipeline.js: saveRunHistory failed (non-fatal):', err.message);
@@ -280,7 +289,7 @@ export async function runPipeline(funds, weights, userId, dataSourcePrefs = {}, 
 
   // \u2500\u2500 Return \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
   return {
-    funds:         scoredFunds,
+    funds:         enrichedFunds,
     worldData:     {
       fredData:     worldData.fredData,
       headlines:    worldData.headlines,
