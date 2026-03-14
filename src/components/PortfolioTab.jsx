@@ -31,30 +31,49 @@ function DonutChart({ slices, size = 200, innerRadius = 0.6, label, onSliceClick
   const ir = r * innerRadius;
 
   // Build arc paths
+  // NOTE: SVG arcs cannot draw a full 360° circle (start = end point renders
+  // as nothing). For slices >= 99.5% we draw two semicircular arcs instead.
   const arcs = useMemo(() => {
     const result = [];
+    const R = r * 0.95;
     let cumulative = 0;
     for (const s of slices) {
       const startAngle = cumulative * 2 * Math.PI;
       cumulative += s.pct / 100;
       const endAngle = cumulative * 2 * Math.PI;
-      // SVG arc
-      const x1 = r + r * 0.95 * Math.sin(startAngle);
-      const y1 = r - r * 0.95 * Math.cos(startAngle);
-      const x2 = r + r * 0.95 * Math.sin(endAngle);
-      const y2 = r - r * 0.95 * Math.cos(endAngle);
-      const ix1 = r + ir * Math.sin(endAngle);
-      const iy1 = r - ir * Math.cos(endAngle);
-      const ix2 = r + ir * Math.sin(startAngle);
-      const iy2 = r - ir * Math.cos(startAngle);
-      const large = s.pct > 50 ? 1 : 0;
-      const d = [
-        `M ${x1} ${y1}`,
-        `A ${r * 0.95} ${r * 0.95} 0 ${large} 1 ${x2} ${y2}`,
-        `L ${ix1} ${iy1}`,
-        `A ${ir} ${ir} 0 ${large} 0 ${ix2} ${iy2}`,
-        'Z',
-      ].join(' ');
+
+      let d;
+      if (s.pct >= 99.5) {
+        // Full ring — draw two semicircular arcs to avoid the SVG 360° arc bug
+        const top    = { ox: r, oy: r - R,  ix: r, iy: r - ir };
+        const bottom = { ox: r, oy: r + R,  ix: r, iy: r + ir };
+        d = [
+          `M ${top.ox} ${top.oy}`,
+          `A ${R} ${R} 0 1 1 ${bottom.ox} ${bottom.oy}`,
+          `A ${R} ${R} 0 1 1 ${top.ox} ${top.oy}`,
+          `L ${top.ix} ${top.iy}`,
+          `A ${ir} ${ir} 0 1 0 ${bottom.ix} ${bottom.iy}`,
+          `A ${ir} ${ir} 0 1 0 ${top.ix} ${top.iy}`,
+          'Z',
+        ].join(' ');
+      } else {
+        const x1  = r + R  * Math.sin(startAngle);
+        const y1  = r - R  * Math.cos(startAngle);
+        const x2  = r + R  * Math.sin(endAngle);
+        const y2  = r - R  * Math.cos(endAngle);
+        const ix1 = r + ir * Math.sin(endAngle);
+        const iy1 = r - ir * Math.cos(endAngle);
+        const ix2 = r + ir * Math.sin(startAngle);
+        const iy2 = r - ir * Math.cos(startAngle);
+        const large = s.pct > 50 ? 1 : 0;
+        d = [
+          `M ${x1} ${y1}`,
+          `A ${R} ${R} 0 ${large} 1 ${x2} ${y2}`,
+          `L ${ix1} ${iy1}`,
+          `A ${ir} ${ir} 0 ${large} 0 ${ix2} ${iy2}`,
+          'Z',
+        ].join(' ');
+      }
       result.push({ ...s, d, midAngle: (startAngle + endAngle) / 2 });
     }
     return result;
