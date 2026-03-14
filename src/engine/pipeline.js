@@ -1,17 +1,25 @@
-// FundLens v4 — Pipeline orchestrator
+// FundLens v4 \u2014 Pipeline orchestrator
 // Coordinates all engine files in the correct order, handles errors,
 // reports progress, and returns the full scored result set.
 //
 // Architecture notes:
 // - Manager scoring and EDGAR holdings start immediately (background tasks)
 //   before Step 1 begins, since both are slow and independent of world data.
-// - World data → Thesis → Holdings → Tiingo → Expenses → Manager → Mandate → Score
+// - World data \u2192 Thesis \u2192 Holdings \u2192 Tiingo \u2192 Expenses \u2192 Manager \u2192 Mandate \u2192 Score
 // - Every engine call is wrapped in try/catch. Only mandate coverage failure
 //   aborts the pipeline; all other failures degrade gracefully to 5.0 fallback.
 // - Money market funds (FDRXX, ADAXX) skip edgar, tiingo, expenses, mandate
 //   regardless of dataSourcePrefs. scoring.js returns a fixed 5.0 for them.
 // - onProgress(step, detail) is called before each major step so the UI can
 //   display which stage is running.
+//
+// !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+// !! SEQUENTIAL CLAUDE CALLS \u2014 MANDATORY                                      !!
+// !! Steps that call Claude (expenses, manager, mandate) process funds        !!
+// !! SEQUENTIALLY with delays between API calls. Do NOT use Promise.all()     !!
+// !! for any step that calls /api/claude. Tiingo and EDGAR are external APIs  !!
+// !! and CAN run in parallel.                                                 !!
+// !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 
 import { MONEY_MARKET_FUNDS } from './constants.js';
 import { fetchWorldData }      from './world.js';
@@ -24,31 +32,33 @@ import { scoreMandates }       from './mandate.js';
 import { calcCompositeScore }  from './scoring.js';
 import { saveRunHistory }      from '../services/cache.js';
 
-// ── Source enabled helper ─────────────────────────────────────────────────────
-// A missing key defaults to ENABLED — only explicit `false` disables a source.
+const DELAY_BETWEEN_EXPENSE_CALLS_MS = 1200;
+
+// \u2500\u2500 Source enabled helper \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+// A missing key defaults to ENABLED \u2014 only explicit `false` disables a source.
 function isEnabled(dataSourcePrefs, key) {
   return dataSourcePrefs[key] !== false;
 }
 
-// ── Public entry point ────────────────────────────────────────────────────────
+// \u2500\u2500 Public entry point \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
 /**
  * Run the full FundLens scoring pipeline.
  *
  * @param {Array<{ticker: string, name: string}>} funds
  * @param {{mandateScore: number, momentum: number, riskAdj: number, managerQuality: number}} weights
  * @param {string} userId
- * @param {Object} dataSourcePrefs  — { [key]: boolean }; missing keys default to enabled
- * @param {Function} onProgress     — (step: number, detail: string) => void
- * @returns {Promise<Object>}       — full result object (see shape below)
+ * @param {Object} dataSourcePrefs  \u2014 { [key]: boolean }; missing keys default to enabled
+ * @param {Function} onProgress     \u2014 (step: number, detail: string) => void
+ * @returns {Promise<Object>}       \u2014 full result object (see shape below)
  */
 export async function runPipeline(funds, weights, userId, dataSourcePrefs = {}, onProgress = () => {}) {
   const errors = [];
 
-  // Separate non-money-market funds — only these go through scoring engines
+  // Separate non-money-market funds \u2014 only these go through scoring engines
   const scorableFunds = funds.filter(f => !MONEY_MARKET_FUNDS.has(f.ticker));
   const mmFunds       = funds.filter(f =>  MONEY_MARKET_FUNDS.has(f.ticker));
 
-  // ── t=0: Start slow background tasks immediately ──────────────────────────
+  // \u2500\u2500 t=0: Start slow background tasks immediately \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
   // Manager scoring: independent of world data, starts now
   const managerPromise = isEnabled(dataSourcePrefs, 'manager')
     ? scoreManagers(scorableFunds).catch(err => {
@@ -65,7 +75,7 @@ export async function runPipeline(funds, weights, userId, dataSourcePrefs = {}, 
       : Promise.resolve([]);
   }
 
-  // ── Step 1 — World Data ───────────────────────────────────────────────────
+  // \u2500\u2500 Step 1 \u2014 World Data \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
   onProgress(1, 'Fetching economic data...');
 
   let worldData;
@@ -100,7 +110,7 @@ export async function runPipeline(funds, weights, userId, dataSourcePrefs = {}, 
     filteredWorldData.headlines = [];
   }
 
-  // ── Step 2 — Thesis ───────────────────────────────────────────────────────
+  // \u2500\u2500 Step 2 \u2014 Thesis \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
   onProgress(2, 'Generating investment thesis...');
 
   let thesisResult;
@@ -117,7 +127,7 @@ export async function runPipeline(funds, weights, userId, dataSourcePrefs = {}, 
     };
   }
 
-  // ── Step 3 — Holdings ─────────────────────────────────────────────────────
+  // \u2500\u2500 Step 3 \u2014 Holdings \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
   onProgress(3, 'Loading fund holdings...');
 
   const holdingsMap = {};
@@ -143,7 +153,8 @@ export async function runPipeline(funds, weights, userId, dataSourcePrefs = {}, 
     f => !MONEY_MARKET_FUNDS.has(f.ticker)
   );
 
-  // ── Step 4 — Tiingo ───────────────────────────────────────────────────────
+  // \u2500\u2500 Step 4 \u2014 Tiingo \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+  // Tiingo calls go to the Tiingo REST API (not Claude) \u2014 parallel is safe here.
   onProgress(4, 'Fetching price metrics...');
 
   const tiingoResults = {};
@@ -162,31 +173,40 @@ export async function runPipeline(funds, weights, userId, dataSourcePrefs = {}, 
     });
     await Promise.all(tiingoPromises);
   }
-  // If tiingo disabled, tiingoResults stays {} → null passed to scoring → 5.0 fallback
+  // If tiingo disabled, tiingoResults stays {} \u2192 null passed to scoring \u2192 5.0 fallback
 
-  // ── Step 5 — Expenses ─────────────────────────────────────────────────────
+  // \u2500\u2500 Step 5 \u2014 Expenses \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+  // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+  // !! SEQUENTIAL \u2014 fetchExpenseData() calls Claude internally.          !!
+  // !! Do NOT convert to Promise.all(). See file header.                  !!
+  // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
   onProgress(5, 'Analyzing expense ratios...');
 
   const expenseResults = {};
   if (isEnabled(dataSourcePrefs, 'expenses')) {
-    const expensePromises = scorableFundsWithHoldings.map(async fund => {
+    for (let i = 0; i < scorableFundsWithHoldings.length; i++) {
+      const fund = scorableFundsWithHoldings[i];
       try {
         const result = await fetchExpenseData(fund.ticker, fund.name, fund.holdings);
         expenseResults[fund.ticker] = result;
+
+        // Only delay between API calls, not after cache hits
+        if (!result.fromCache && i < scorableFundsWithHoldings.length - 1) {
+          await new Promise(r => setTimeout(r, DELAY_BETWEEN_EXPENSE_CALLS_MS));
+        }
       } catch (err) {
         errors.push(`Expense fetch failed for ${fund.ticker}: ${err.message}`);
         expenseResults[fund.ticker] = null;
       }
-    });
-    await Promise.all(expensePromises);
+    }
   }
 
-  // ── Step 6 — Manager Scores ───────────────────────────────────────────────
+  // \u2500\u2500 Step 6 \u2014 Manager Scores \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
   onProgress(6, 'Evaluating fund managers...');
 
   const managerScores = await managerPromise;
 
-  // ── Step 7 — Mandate Scoring ──────────────────────────────────────────────
+  // \u2500\u2500 Step 7 \u2014 Mandate Scoring \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
   onProgress(7, 'Scoring mandate alignment...');
 
   let mandateResult = { scores: {}, coverage: 0, acceptable: true };
@@ -209,7 +229,7 @@ export async function runPipeline(funds, weights, userId, dataSourcePrefs = {}, 
     }
   }
 
-  // ── Step 8 — Composite Scores ─────────────────────────────────────────────
+  // \u2500\u2500 Step 8 \u2014 Composite Scores \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
   onProgress(8, 'Computing final scores...');
 
   const aggregateDataQuality = {};
@@ -251,10 +271,10 @@ export async function runPipeline(funds, weights, userId, dataSourcePrefs = {}, 
   // Sort by composite score descending
   scoredFunds.sort((a, b) => b.composite - a.composite);
 
-  // ── Step 9 — Save History ─────────────────────────────────────────────────
+  // \u2500\u2500 Step 9 \u2014 Save History \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
   onProgress(9, 'Saving results...');
 
-  // Fire and forget — do NOT await
+  // Fire and forget \u2014 do NOT await
   saveRunHistory(userId, {
     dominantTheme: thesisResult.dominantTheme,
     macroStance:   thesisResult.macroStance,
@@ -264,7 +284,7 @@ export async function runPipeline(funds, weights, userId, dataSourcePrefs = {}, 
     console.warn('pipeline.js: saveRunHistory failed (non-fatal):', err.message);
   });
 
-  // ── Return ────────────────────────────────────────────────────────────────
+  // \u2500\u2500 Return \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
   return {
     funds:         scoredFunds,
     worldData:     {
