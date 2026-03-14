@@ -77,7 +77,7 @@ async function fetchPrices(ticker) {
 
   try {
     const data = await fetchTiingo(
-      `/tiingo/mutual-funds/${encodeURIComponent(ticker)}/prices`,
+      `/tiingo/daily/${encodeURIComponent(ticker)}/prices`,
       {
         startDate:   fmt(startDate),
         endDate:     fmt(endDate),
