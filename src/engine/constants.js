@@ -111,7 +111,7 @@ export const DEFAULT_WEIGHTS = { mandateScore: 40, momentum: 25, riskAdj: 20, ma
 
 export const FACTOR_LABELS = {
   mandateScore:   { label: 'Macro Fit',   desc: "How well this fund's investment mandate aligns with current macro conditions" },
-  momentum:       { label: 'Market Feel', desc: "Recent price trend (63-day momentum) — the market's current vote on this fund" },
+  momentum:       { label: 'Market Feel', desc: "Recent price trend (63-day momentum) \u2014 the market's current vote on this fund" },
   riskAdj:        { label: 'Room to Run', desc: 'Return quality relative to risk (Sharpe ratio)' },
   managerQuality: { label: 'Foundations', desc: 'Management team quality, fund stability, parent company reputation, and fee structure' },
 };
@@ -120,7 +120,7 @@ export const WIZARD_STEPS = {
   titles: ['', 'Your Investor Profile', 'Your Fund Universe', 'What Matters to You', 'Ready to Go!'],
   subs: [
     '',
-    'Tell us your name and — if your employer has a FundLens code — enter it to instantly load your 401K fund options.',
+    'Tell us your name and \u2014 if your employer has a FundLens code \u2014 enter it to instantly load your 401K fund options.',
     'Review the funds available in your 401K. You can add or remove tickers at any time.',
     'These four factors drive how FundLens ranks your funds. Adjust them to reflect what you personally believe matters most.',
     'FundLens will analyze the world right now and surface the funds built for this moment.',
@@ -129,28 +129,28 @@ export const WIZARD_STEPS = {
 
 export const WIZARD_FACTORS = [
   {
-    key: 'mandateScore', label: 'Macro Fit', emoji: '🌍',
+    key: 'mandateScore', label: 'Macro Fit', emoji: '\u{1F30D}',
     what: "How well does this fund's strategy match what's happening in the economy right now?",
-    conservative: "Matters somewhat — you want funds that aren't fighting the macro tide.",
-    aggressive:   "Matters a lot — you're betting on the macro call being right.",
+    conservative: "Matters somewhat \u2014 you want funds that aren't fighting the macro tide.",
+    aggressive:   "Matters a lot \u2014 you're betting on the macro call being right.",
   },
   {
-    key: 'momentum', label: 'Market Feel', emoji: '📈',
+    key: 'momentum', label: 'Market Feel', emoji: '\u{1F4C8}',
     what: 'Is this fund already moving in the right direction? Recent 63-day price trend.',
-    conservative: "Matters less — past movement doesn't guarantee safety.",
-    aggressive:   'Matters a lot — you want funds the market is already rewarding.',
+    conservative: "Matters less \u2014 past movement doesn't guarantee safety.",
+    aggressive:   'Matters a lot \u2014 you want funds the market is already rewarding.',
   },
   {
-    key: 'riskAdj', label: 'Room to Run', emoji: '⚖️',
-    what: 'Does this fund deliver returns without wild swings? (Sharpe ratio — return per unit of risk)',
-    conservative: 'Matters most — you want steady returns, not a rollercoaster.',
-    aggressive:   "Matters less — you're willing to accept volatility for bigger gains.",
+    key: 'riskAdj', label: 'Room to Run', emoji: '\u2696\uFE0F',
+    what: 'Does this fund deliver returns without wild swings? (Sharpe ratio \u2014 return per unit of risk)',
+    conservative: 'Matters most \u2014 you want steady returns, not a rollercoaster.',
+    aggressive:   "Matters less \u2014 you're willing to accept volatility for bigger gains.",
   },
   {
-    key: 'managerQuality', label: 'Foundations', emoji: '🏛️',
+    key: 'managerQuality', label: 'Foundations', emoji: '\u{1F3DB}\uFE0F',
     what: "How consistently has this fund's management team executed over time?",
-    conservative: "Matters more — you want a fund you can trust to do what it says.",
-    aggressive:   "Matters as a floor — you still don't want a badly run fund.",
+    conservative: "Matters more \u2014 you want a fund you can trust to do what it says.",
+    aggressive:   "Matters as a floor \u2014 you still don't want a badly run fund.",
   },
 ];
 
