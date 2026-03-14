@@ -13,6 +13,7 @@ const FRED_KEY       = process.env.FRED_KEY;
 const TWELVEDATA_KEY = process.env.TWELVEDATA_KEY;
 const SUPA_URL       = process.env.SUPA_URL;
 const SUPA_KEY       = process.env.SUPA_KEY;
+const FINNHUB_KEY    = process.env.FINNHUB_KEY;
 const SUPA_ANON_KEY  = process.env.SUPA_ANON_KEY;
 
 app.use(express.json({ limit: '2mb' }));
@@ -92,6 +93,13 @@ app.all('/api/twelvedata/*', (req, res) => {
   proxyFetch(req, res, `https://api.twelvedata.com${up}${qs}${sep}apikey=${TWELVEDATA_KEY}`);
 });
 
+app.all('/api/finnhub/*', (req, res) => {
+  const up = req.path.replace('/api/finnhub', '');
+  const qs = req.url.includes('?') ? req.url.slice(req.url.indexOf('?')) : '';
+  const sep = qs ? '&' : '?';
+  proxyFetch(req, res, `https://finnhub.io/api/v1${up}${qs}${sep}token=${FINNHUB_KEY}`);
+});
+
 app.get('/api/treasury', async (req, res) => {
   try {
     const now = new Date();
@@ -162,6 +170,7 @@ app.get('/api/devinfo', async (req, res) => {
         TINNGO_KEY:     !!process.env.TINNGO_KEY,
         FRED_KEY:       !!process.env.FRED_KEY,
         TWELVEDATA_KEY: !!process.env.TWELVEDATA_KEY,
+        FINNHUB_KEY:    !!process.env.FINNHUB_KEY,
         SUPA_URL:       !!process.env.SUPA_URL,
         SUPA_KEY:       !!process.env.SUPA_KEY,
         SUPA_ANON_KEY:  !!process.env.SUPA_ANON_KEY,
