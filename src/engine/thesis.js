@@ -52,10 +52,10 @@ function buildTreasuryBlock(treasuryData) {
     `Treasury Yield Curve (as of ${date ?? '[unknown date]'}):`,
     `  1Y: ${fmt(y1)}  2Y: ${fmt(y2)}  5Y: ${fmt(y5)}  10Y: ${fmt(y10)}  30Y: ${fmt(y30)}`,
     `  Spreads:`,
-    `    Short end  (2Y-1Y):          ${fmtS(spreads?.shortEnd)} — near-term rate expectations`,
-    `    Belly      (5Y vs 2Y/10Y):   ${fmtS(spreads?.belly)}   — curve curvature`,
-    `    Classic    (10Y-2Y):         ${fmtS(spreads?.classic)} — recession predictor`,
-    `    Long end   (30Y-10Y):        ${fmtS(spreads?.longEnd)} — long-term inflation expectations`,
+    `    Short end  (2Y-1Y):          ${fmtS(spreads?.shortEnd)} \u2014 near-term rate expectations`,
+    `    Belly      (5Y vs 2Y/10Y):   ${fmtS(spreads?.belly)}   \u2014 curve curvature`,
+    `    Classic    (10Y-2Y):         ${fmtS(spreads?.classic)} \u2014 recession predictor`,
+    `    Long end   (30Y-10Y):        ${fmtS(spreads?.longEnd)} \u2014 long-term inflation expectations`,
   ].join('\n');
 }
 
@@ -75,17 +75,17 @@ function buildSectorList() {
 
 // ── JSON schema description embedded in prompt ────────────────────────────────
 const JSON_SCHEMA = `
-Respond with ONLY a valid JSON object in this exact shape — no markdown, no preamble:
+Respond with ONLY a valid JSON object in this exact shape \u2014 no markdown, no preamble:
 {
   "investmentThesis": "<exactly 3 sentences: (1) what is happening in the world right now, (2) what that means for fund investors, (3) the one signal to watch that could change this>",
   "dominantTheme": "<1 short phrase, e.g. 'Fed pivot uncertainty' or 'stagflation risk'>",
   "macroStance": "<one of: bullish | bearish | neutral | transitional>",
   "sectorScores": {
-    "<sector name>": { "score": <number 1.0–10.0, one decimal place>, "reasoning": "<1 sentence>" },
+    "<sector name>": { "score": <number 1.0\u201310.0, one decimal place>, "reasoning": "<1 sentence>" },
     ... (all 11 GICS sectors required)
   }
 }
-Score guidance: 8–10 = macro tailwinds strongly favor this sector now. 5 = neutral. 1–3 = macro headwinds. Use the full range.
+Score guidance: 8\u201310 = macro tailwinds strongly favor this sector now. 5 = neutral. 1\u20133 = macro headwinds. Use the full range.
 `.trim();
 
 // ── Main export ───────────────────────────────────────────────────────────────
@@ -105,7 +105,7 @@ export async function generateThesis(worldData = {}) {
     'You are a senior macro strategist at a large asset management firm.',
     'Your job is to interpret current economic data and form a concise, actionable investment thesis.',
     'You are precise, data-driven, and honest about uncertainty.',
-    'You score sectors purely on macroeconomic fit — not on individual fund quality.',
+    'You score sectors purely on macroeconomic fit \u2014 not on individual fund quality.',
     'You always respond with only valid JSON. No markdown, no explanation outside the JSON.',
   ].join(' ');
 
@@ -139,14 +139,14 @@ export async function generateThesis(worldData = {}) {
     // Ensure macroStance is one of the four allowed values
     const validStances = new Set(['bullish', 'bearish', 'neutral', 'transitional']);
     if (!validStances.has(result.macroStance)) {
-      console.warn('thesis.js: unexpected macroStance value:', result.macroStance, '— defaulting to neutral');
+      console.warn('thesis.js: unexpected macroStance value:', result.macroStance, '\u2014 defaulting to neutral');
       result.macroStance = 'neutral';
     }
 
     // Ensure all 11 sectors are present in sectorScores; fill any missing with fallback
     for (const sector of Object.keys(GICS_SECTORS)) {
       if (!result.sectorScores[sector] || typeof result.sectorScores[sector].score !== 'number') {
-        console.warn('thesis.js: missing or invalid sector score for', sector, '— using fallback');
+        console.warn('thesis.js: missing or invalid sector score for', sector, '\u2014 using fallback');
         result.sectorScores[sector] = { score: 5.0, reasoning: 'No thesis data available.' };
       } else {
         // Clamp score to 1.0–10.0, round to 1 decimal
