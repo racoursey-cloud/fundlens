@@ -27,7 +27,7 @@ async function proxyFetch(req, res, url, extraHeaders = {}) {
     const upstream = await fetch(url, opts);
     res.status(upstream.status);
     upstream.headers.forEach((v, k) => {
-      if (!['transfer-encoding','connection','keep-alive'].includes(k.toLowerCase())) res.setHeader(k, v);
+      if (!['transfer-encoding','content-encoding','content-length','connection','keep-alive'].includes(k.toLowerCase())) res.setHeader(k, v);
     });
     res.send(await upstream.text());
   } catch (e) {
