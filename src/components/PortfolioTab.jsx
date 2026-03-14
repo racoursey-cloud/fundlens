@@ -266,15 +266,7 @@ export default function PortfolioTab() {
 
   const handleRiskChange = useCallback((val) => {
     setRiskTolerance(val);
-    // rescoreWithWeights doesn't accept risk separately — we need to update
-    // userWeights.risk_tolerance in the store and rerun outlier. For now we
-    // call the store's set directly through the existing rescore path.
-    // Risk tolerance is read inside computeOutliersAndAllocation via getState().
-    // We update the store's userWeights, then trigger a rescore with current weights.
-    useAppStore.setState(prev => ({
-      userWeights: { ...prev.userWeights, risk_tolerance: val },
-    }));
-    rescoreAction(weights);
+    rescoreAction(weights, val);
   }, [weights, rescoreAction]);
 
   // ── Empty state ─────────────────────────────────────────────────────────
