@@ -178,6 +178,9 @@ export function calcCompositeScore({
   const modified  = raw - concentrationPenalty + expenseModifier;
   const composite = Math.round(Math.max(1.0, Math.min(10.0, modified)) * 10) / 10;
 
+  // DEBUG — remove after diagnosis
+  console.log(`[score] ${ticker} | mandate=${Math.round(mandate*10)/10} mom=${Math.round(momentum*10)/10} sharpe=${Math.round(sharpe*10)/10} mgr=${Math.round(manager*10)/10} exp=${expenseModifier} conc=${concentrationPenalty} → ${composite}`);
+
   return {
     composite,
     breakdown: {
