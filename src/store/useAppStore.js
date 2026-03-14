@@ -99,8 +99,9 @@ export const useAppStore = create((set, get) => ({
    * Updates userWeights in state so getWeights() reflects the new values.
    *
    * @param {{ mandateScore: number, momentum: number, riskAdj: number, managerQuality: number }} newWeights
+   * @param {number} [newRiskTolerance] — optional; if provided, updates risk tolerance before rescoring
    */
-  rescoreWithWeights: (newWeights) => {
+  rescoreWithWeights: (newWeights, newRiskTolerance) => {
     const { funds } = get();
     if (!funds?.length) return;
 
@@ -139,20 +140,25 @@ export const useAppStore = create((set, get) => ({
     updatedFunds.sort((a, b) => b.composite - a.composite);
 
     // Re-run outlier detection + allocation with new composites
-    const riskTolerance = get().getRiskTolerance();
+    const riskTolerance = newRiskTolerance ?? get().getRiskTolerance();
     const enrichedFunds = computeOutliersAndAllocation(updatedFunds, riskTolerance);
 
     // Merge new weights into userWeights using the DB snake_case keys so
     // getWeights() continues to work correctly on next read.
+    const mergedWeights = {
+      ...get().userWeights,
+      mandate_score:   newWeights.mandateScore,
+      momentum:        newWeights.momentum,
+      risk_adj:        newWeights.riskAdj,
+      manager_quality: newWeights.managerQuality,
+    };
+    // Persist risk tolerance if explicitly provided
+    if (newRiskTolerance != null) {
+      mergedWeights.risk_tolerance = newRiskTolerance;
+    }
     set({
       funds: enrichedFunds,
-      userWeights: {
-        ...get().userWeights,
-        mandate_score:   newWeights.mandateScore,
-        momentum:        newWeights.momentum,
-        risk_adj:        newWeights.riskAdj,
-        manager_quality: newWeights.managerQuality,
-      },
+      userWeights: mergedWeights,
     });
   },
 
