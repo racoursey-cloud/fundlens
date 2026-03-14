@@ -77,7 +77,7 @@ async function fetchPrices(ticker) {
 
   try {
     const data = await fetchTiingo(
-      `/daily/${encodeURIComponent(ticker)}/prices`,
+      `/tiingo/mutual-funds/${encodeURIComponent(ticker)}/prices`,
       {
         startDate:   fmt(startDate),
         endDate:     fmt(endDate),
@@ -91,8 +91,9 @@ async function fetchPrices(ticker) {
       return null;
     }
 
-    // Extract adjusted close prices, oldest first
-    // Tiingo field: adjClose (preferred) or close
+    // Extract close prices, oldest first
+    // Tiingo mutual fund endpoint returns { date, close } (NAV per share).
+    // adjClose is only present on stock/ETF endpoints; fallback to close handles both.
     const prices = data
       .map(d => d.adjClose ?? d.close)
       .filter(p => p != null && p > 0);
