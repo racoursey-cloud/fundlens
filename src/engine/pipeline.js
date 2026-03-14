@@ -15,10 +15,10 @@
 //
 // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 // !! SEQUENTIAL CLAUDE CALLS \u2014 MANDATORY                                      !!
-// !! Steps that call Claude (expenses, manager, mandate) process funds        !!
-// !! SEQUENTIALLY with delays between API calls. Do NOT use Promise.all()     !!
-// !! for any step that calls /api/claude. Tiingo and EDGAR are external APIs  !!
-// !! and CAN run in parallel.                                                 !!
+// !! Steps that call Claude (manager, mandate) process funds SEQUENTIALLY    !!
+// !! with delays between API calls. Do NOT use Promise.all() for any step    !!
+// !! that calls /api/claude. Tiingo, EDGAR, Finnhub, and expenses are        !!
+// !! external APIs and CAN run in parallel.                                  !!
 // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 
 import { MONEY_MARKET_FUNDS } from './constants.js';
@@ -31,8 +31,6 @@ import { scoreManagers }       from './manager.js';
 import { scoreMandates }       from './mandate.js';
 import { calcCompositeScore }  from './scoring.js';
 import { saveRunHistory }      from '../services/cache.js';
-
-const DELAY_BETWEEN_EXPENSE_CALLS_MS = 1200;
 
 // \u2500\u2500 Source enabled helper \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
 // A missing key defaults to ENABLED \u2014 only explicit `false` disables a source.
@@ -177,28 +175,24 @@ export async function runPipeline(funds, weights, userId, dataSourcePrefs = {}, 
 
   // \u2500\u2500 Step 5 \u2014 Expenses \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
   // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-  // !! SEQUENTIAL \u2014 fetchExpenseData() calls Claude internally.          !!
-  // !! Do NOT convert to Promise.all(). See file header.                  !!
+  // !! expenses.js no longer calls Claude -- uses Finnhub + static map. !!
+  // !! Parallel is safe here. Same pattern as Tiingo (Step 4).          !!
   // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
   onProgress(5, 'Analyzing expense ratios...');
 
+  // Expenses now use Finnhub + Supabase cache (no Claude calls) — parallel is safe.
   const expenseResults = {};
   if (isEnabled(dataSourcePrefs, 'expenses')) {
-    for (let i = 0; i < scorableFundsWithHoldings.length; i++) {
-      const fund = scorableFundsWithHoldings[i];
+    const expensePromises = scorableFundsWithHoldings.map(async fund => {
       try {
         const result = await fetchExpenseData(fund.ticker, fund.name, fund.holdings);
         expenseResults[fund.ticker] = result;
-
-        // Only delay between API calls, not after cache hits
-        if (!result.fromCache && i < scorableFundsWithHoldings.length - 1) {
-          await new Promise(r => setTimeout(r, DELAY_BETWEEN_EXPENSE_CALLS_MS));
-        }
       } catch (err) {
         errors.push(`Expense fetch failed for ${fund.ticker}: ${err.message}`);
         expenseResults[fund.ticker] = null;
       }
-    }
+    });
+    await Promise.all(expensePromises);
   }
 
   // \u2500\u2500 Step 6 \u2014 Manager Scores \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
