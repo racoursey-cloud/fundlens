@@ -4,15 +4,16 @@
 // Pure math — no API calls, no async, no side effects.
 // Runs instantly after composite scoring (pipeline Step 8) and before history save.
 //
-// Inputs:  scored fund array + risk tolerance (1–10)
+// Inputs:  scored fund array + risk tolerance (1–9)
 // Outputs: same fund array enriched with { zScore, allocPct } per fund
 //
 // Design:
 //   1. Compute Modified Z-Score for each fund using MAD (robust to small samples)
 //   2. Convert Z-scores to allocation weights via exponential curve
-//   3. Risk tolerance controls the curve steepness (k):
-//      - Risk 1  → k ≈ 0.19 (nearly flat, minimal concentration)
-//      - Risk 10 → k = 1.0  (aggressive concentration in leaders)
+//   3. Risk tolerance controls the curve steepness (k), range 1–9:
+//      - Risk 1  → k = 0.30  (nearly flat, minimal concentration)
+//      - Risk 9  → k = 1.90  (aggressive tilt toward leaders)
+//      Hard cap of 30% per fund — within 401K diversification norms.
 //   4. DATA CONFIDENCE GATE: Funds with 4+ of 6 dataQuality fallback flags
 //      are excluded from allocation entirely. Their composite is built on
 //      mostly-guessed data and should not drive investment decisions.
@@ -93,7 +94,7 @@ const MAX_FALLBACKS = 3; // funds with MORE than this many are excluded
  *   zScore = 0, tier = 'MONEY_MARKET', allocPct = 0.
  *
  * @param {number} riskTolerance
- *   Integer 1–10 from user profile. Controls exponential curve steepness.
+ *   Integer 1–9 from user profile. Controls exponential curve steepness.
  *
  * @returns {Array<{ticker: string, composite: number, zScore: number, tier: string, allocPct: number, ...}>}
  *   Same fund array (same order as input), each fund enriched with:
@@ -105,7 +106,7 @@ export function computeOutliersAndAllocation(scoredFunds, riskTolerance) {
   if (!scoredFunds?.length) return [];
 
   // Clamp risk tolerance to valid range
-  const rt = Math.max(1, Math.min(10, riskTolerance ?? 5));
+  const rt = Math.max(1, Math.min(9, riskTolerance ?? 5));
 
   // Separate money market funds and low-confidence funds
   const scorable = [];
@@ -157,14 +158,30 @@ export function computeOutliersAndAllocation(scoredFunds, riskTolerance) {
   // Among qualifying funds:
   //   weight_i = composite_i × e^(zScore_i × k)
   //
-  // k = 0.1 + (riskTolerance × 0.09)
-  //   Risk 1  → k = 0.19  (nearly score-proportional among qualifiers)
-  //   Risk 5  → k = 0.55  (moderate concentration in leaders)
-  //   Risk 10 → k = 1.00  (aggressive concentration in top qualifiers)
+  // k = 0.1 + (riskTolerance × 0.20)
+  //   Risk 1  → k = 0.30  (nearly score-proportional among qualifiers)
+  //   Risk 5  → k = 1.10  (moderate tilt — leader ~28%, tail ~3%)
+  //   Risk 9  → k = 1.90  (aggressive tilt, top funds hit 30% cap)
+  //
+  // 401K context (source: NerdWallet, Ramsey, Fidelity, Bogleheads):
+  //   Unlike individual stocks, each 401K fund already holds dozens or
+  //   hundreds of securities. Concentration risk here is about asset class
+  //   and style overlap, not single-security exposure. Standard 401K
+  //   advice splits contributions across fund categories:
+  //     - Ramsey: 25% each across 4 fund types
+  //     - NerdWallet: 50/30/10/10 across cap sizes + international
+  //     - No mainstream 401K advisor recommends >30% in a single fund
+  //   Risk tolerance adjusts the tilt toward top-scoring funds but the
+  //   25% cap ensures no single fund dominates the allocation.
+  //
+  // POSITION CAP: No single fund may exceed MAX_POSITION_PCT. Excess weight
+  // is redistributed proportionally among uncapped funds to preserve the
+  // relative ranking signal while enforcing a prudent ceiling.
 
-  const Z_FLOOR = 0; // median gate — funds below this get 0% allocation
+  const Z_FLOOR = 0;             // median gate — funds below this get 0%
+  const MAX_POSITION_PCT = 30.0; // hard cap per fund (401K diversification norm)
 
-  const k = 0.1 + (rt * 0.09);
+  const k = 0.1 + (rt * 0.20);
 
   const rawWeights = scorable.map((s, i) => {
     const qualified = zScores[i] >= Z_FLOOR && !lowConfIndices.has(s.index);
@@ -184,6 +201,33 @@ export function computeOutliersAndAllocation(scoredFunds, riskTolerance) {
       ? Math.round((rw.weight / totalWeight) * 1000) / 10  // 1 decimal place
       : 0;
     allocMap[rw.index] = { zScore: rw.zScore, allocPct: pct };
+  }
+
+  // ── Position cap: redistribute excess from capped funds ────────────────
+  // Iterative redistribution — a capped fund's excess flows proportionally
+  // to uncapped funds, which may themselves then hit the cap. Converges in
+  // 2–3 passes for typical fund counts.
+  for (let pass = 0; pass < 5; pass++) {
+    let excess = 0;
+    let uncappedTotal = 0;
+
+    for (const [, v] of Object.entries(allocMap)) {
+      if (v.allocPct > MAX_POSITION_PCT) {
+        excess += v.allocPct - MAX_POSITION_PCT;
+        v.allocPct = MAX_POSITION_PCT;
+      } else if (v.allocPct > 0) {
+        uncappedTotal += v.allocPct;
+      }
+    }
+
+    if (excess < 0.05 || uncappedTotal === 0) break; // converged
+
+    // Redistribute proportionally among uncapped funds
+    for (const [, v] of Object.entries(allocMap)) {
+      if (v.allocPct > 0 && v.allocPct < MAX_POSITION_PCT) {
+        v.allocPct = Math.round((v.allocPct + (excess * v.allocPct / uncappedTotal)) * 10) / 10;
+      }
+    }
   }
 
   // Fix rounding so non-MM percentages sum to exactly 100.0
