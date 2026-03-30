@@ -71,7 +71,7 @@ app.all('/api/gdelt', (req, res) => {
 app.all('/api/edgar/*', (req, res) => {
   const up = req.path.replace('/api/edgar', '');
   const qs = req.url.includes('?') ? req.url.slice(req.url.indexOf('?')) : '';
-  proxyFetch(req, res, `https://data.sec.gov/submissions${up}${qs}`, { 'User-Agent': 'FundLens/4.0 admin@fundlens.app', Accept: 'application/json' });
+  proxyFetch(req, res, `https://data.sec.gov/${up}${qs}`, { 'User-Agent': 'FundLens/4.0 admin@fundlens.app', Accept: 'application/json' });
 });
 
 app.all('/api/efts/*', (req, res) => {
