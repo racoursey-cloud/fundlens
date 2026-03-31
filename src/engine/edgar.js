@@ -12,20 +12,20 @@
 //   Claude calls route through /api/claude (Railway proxy).
 // - Never throws — returns [] on any unrecoverable failure.
 //
-// EDGAR proxy routing (critical — two different hosts):
-//   /api/edgar   → https://data.sec.gov   — submissions, company data, CIK maps
-//   /api/www4sec → https://www.sec.gov    — filing ARCHIVES (/Archives/edgar/data/...)
+// EDGAR proxy routing (two different hosts):
+//   /api/edgar   → https://data.sec.gov   — submissions JSON, CIK maps
+//   /api/www4sec → https://www.sec.gov    — filing archives (XML documents)
 //
-// The filing index JSON and primary XML both live on www.sec.gov, not data.sec.gov.
-// Using /api/edgar for archive paths returns 404 on every request.
+// Primary document discovery:
+//   The submissions/CIK*.json response includes a `primaryDocument` array
+//   alongside `accessionNumber` and `form`. No separate index.json fetch needed.
+//   Index JSON files (e.g. {accession}-index.json) are not reliably present
+//   on www.sec.gov and should not be used.
 //
-// EDGAR archives path notes:
-// - Filings are stored under the FILER's CIK, not the fund's own CIK.
-//   e.g. FXAIX (fund CIK 819118) is filed by Fidelity Management (CIK 35402).
-//   The filer CIK is the first numeric segment of the accession number:
+// EDGAR archives path:
+//   Filings are stored under the FILER's CIK, not the fund's CIK.
+//   Filer CIK = first numeric segment of the accession number:
 //     "0000035402-26-002126" → filer CIK = 35402
-// - The primary NPORT-P document is an XML file whose name varies per filer.
-//   We discover it from the filing's index JSON, then fetch and parse the XML.
 //
 // Output shape (array of holding objects):
 // {
@@ -46,24 +46,18 @@ const SECTOR_BATCH_SIZE  = 20;  // Max tickers sent to Claude per sector request
 const MIN_EQUITY_WEIGHT  = 0.1; // % -- skip sector lookup for tiny equity positions
 
 // -- SEC rate limiter ---------------------------------------------------------
-// SEC blocks IPs that make too many concurrent requests. This simple queue
-// ensures at most 1 SEC request in flight at once, with a 600ms gap between.
-//
-// FIX (2026-03): Each caller gets their own independent `result` promise.
-// The shared queue absorbs failures via .catch(() => {}) so the chain always
-// advances regardless of individual errors.
+// Each caller gets its own independent `result` promise. The shared queue
+// absorbs failures so the chain always advances.
 let secQueue = Promise.resolve();
 function throttledSecRequest(fn) {
   const result = secQueue.then(() => fn());
   secQueue = result
-    .catch(() => {})  // absorb error so the queue always continues
+    .catch(() => {})
     .finally(() => new Promise(r => setTimeout(r, 600)));
   return result;
 }
 
 // -- company_tickers_mf.json cache -------------------------------------------
-// Single fetch from SEC, cached for the lifetime of the page session.
-// Maps ticker -> CIK for all registered mutual funds (~28k entries).
 let cikMapPromise = null;
 
 async function loadCikMap() {
@@ -106,7 +100,6 @@ async function getCik(ticker) {
   const mapped = cikMap.get(ticker.toUpperCase());
   if (mapped) return mapped;
 
-  // Fallback: browse-edgar Atom feed
   try {
     const xml = await throttledSecRequest(() =>
       fetchSEC(
@@ -125,9 +118,12 @@ async function getCik(ticker) {
   return null;
 }
 
-// ── Latest NPORT-P accession ──────────────────────────────────────────────────
-// Uses data.sec.gov via /api/edgar — correct for submissions endpoint.
-async function getLatestNportAccession(cik) {
+// ── Latest NPORT-P accession + primary document name ─────────────────────────
+// The submissions API response includes `primaryDocument[]` alongside
+// `accessionNumber[]` and `form[]`. We read the primary XML filename here
+// so no separate index.json fetch is needed.
+// Returns { accession, primaryDoc } or null.
+async function getLatestNportFiling(cik) {
   try {
     const data = await throttledSecRequest(() =>
       fetchEdgar(`/submissions/CIK${cik.padStart(10, '0')}.json`)
@@ -135,17 +131,21 @@ async function getLatestNportAccession(cik) {
     const filings = data?.filings?.recent;
     if (!filings) return null;
 
-    const forms = filings.form ?? [];
-    const accessions = filings.accessionNumber ?? [];
+    const forms       = filings.form            ?? [];
+    const accessions  = filings.accessionNumber ?? [];
+    const primaryDocs = filings.primaryDocument  ?? [];
 
     for (let i = 0; i < forms.length; i++) {
       if (forms[i] === 'NPORT-P') {
-        return accessions[i]; // e.g. "0001752724-24-123456"
+        return {
+          accession:  accessions[i],   // e.g. "0001410368-26-026282"
+          primaryDoc: primaryDocs[i],  // e.g. "primary_doc.xml"
+        };
       }
     }
     return null;
   } catch (err) {
-    console.warn(`[edgar] Accession lookup failed for CIK ${cik}:`, err.message);
+    console.warn(`[edgar] Submissions lookup failed for CIK ${cik}:`, err.message);
     return null;
   }
 }
@@ -312,61 +312,38 @@ export async function fetchHoldings(ticker, fundName) {
     return [];
   }
 
-  const accession = await getLatestNportAccession(cik);
-  if (!accession) {
+  // Get accession number AND primary doc name from submissions API in one call.
+  // No separate index.json fetch needed — primaryDocument[] is in submissions.
+  const filing = await getLatestNportFiling(cik);
+  if (!filing) {
     console.warn(`[edgar] No NPORT-P filing found for ${ticker} (CIK ${cik})`);
     return [];
   }
 
-  // ── Fetch NPORT-P filing ─────────────────────────────────────────────────
-  // Filing archives live on www.sec.gov — use /api/www4sec proxy.
-  // /api/edgar proxies to data.sec.gov (submissions/company data only).
-  // Using /api/edgar for archive paths causes 404 on every request.
-  //
-  // Filer CIK comes from the accession number first segment:
-  //   "0000035402-26-002126" → filerCik = "35402"
+  const { accession, primaryDoc } = filing;
+
+  if (!primaryDoc) {
+    console.warn(`[edgar] No primaryDocument in submissions for ${ticker} (accession ${accession})`);
+    return [];
+  }
+
+  // ── Fetch NPORT-P XML ────────────────────────────────────────────────────
+  // Archives live on www.sec.gov — use /api/www4sec proxy.
+  // Filer CIK = first numeric segment of accession: "0000035402-26-002126" → 35402
   let holdings = [];
   try {
     const accessionClean = accession.replace(/-/g, '');
     const filerCik       = String(parseInt(accession.split('-')[0], 10));
-    const archiveBase    = `/api/www4sec/Archives/edgar/data/${filerCik}/${accessionClean}`;
+    const xmlUrl         = `/api/www4sec/Archives/edgar/data/${filerCik}/${accessionClean}/${primaryDoc}`;
 
-    // Step 1: Fetch filing index JSON to discover the primary XML filename.
-    let primaryDocName = null;
-    try {
-      const indexRes = await throttledSecRequest(() =>
-        fetch(`${archiveBase}/${accession}-index.json`)
-          .then(r => {
-            if (!r.ok) throw new Error(`HTTP ${r.status}: ${r.statusText}`);
-            return r.json();
-          })
-      );
-      const files = Array.isArray(indexRes?.files) ? indexRes.files : [];
-      // Pick type "NPORT-P" first; fall back to first .xml that isn't a schema
-      const primary = files.find(f => f.type === 'NPORT-P') ||
-                      files.find(f => f.name && /\.xml$/i.test(f.name) && !/\.xsd$/i.test(f.name));
-      primaryDocName = primary?.name || null;
-    } catch (err) {
-      console.warn(`[edgar] Index fetch failed for ${ticker} (filer ${filerCik}/${accessionClean}):`, err.message);
-    }
-
-    if (!primaryDocName) {
-      console.warn(`[edgar] No primary XML found in filing index for ${ticker} (filer ${filerCik})`);
-      return [];
-    }
-
-    // Step 2: Fetch primary XML as raw text — also via /api/www4sec.
     const xmlText = await throttledSecRequest(() =>
-      fetch(`${archiveBase}/${primaryDocName}`)
-        .then(r => {
-          if (!r.ok) throw new Error(`HTTP ${r.status}`);
-          return r.text();
-        })
+      fetch(xmlUrl).then(r => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.text();
+      })
     );
 
-    // Step 3: Parse NPORT-P XML with DOMParser.
     holdings = parseHoldingsFromXml(xmlText);
-
   } catch (err) {
     console.warn(`[edgar] NPORT-P fetch failed for ${ticker} (accession ${accession}):`, err.message);
     return [];
