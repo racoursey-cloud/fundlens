@@ -1,18 +1,19 @@
 import { useAppStore } from '../../store/useAppStore.js';
 
 const STEP_LABELS = {
-  1: 'Fetching economic data',
-  2: 'Generating investment thesis',
-  3: 'Loading fund holdings',
-  4: 'Fetching price metrics',
-  5: 'Analyzing expense ratios',
-  6: 'Evaluating fund managers',
-  7: 'Scoring mandate alignment',
-  8: 'Computing final scores',
-  9: 'Saving results',
+  1:  'Fetching economic data',
+  2:  'Generating investment thesis',
+  3:  'Loading fund holdings',
+  4:  'Fetching price metrics',
+  5:  'Analyzing expense ratios',
+  6:  'Evaluating fund managers',
+  7:  'Scoring mandate alignment',
+  8:  'Computing final scores',
+  9:  'Detecting outliers \u0026 computing allocation',
+  10: 'Saving results',
 };
 
-const TOTAL_STEPS = 9;
+const TOTAL_STEPS = 10;
 
 export default function PipelineOverlay() {
   const { loading, pipelineStep, pipelineDetail } = useAppStore();
