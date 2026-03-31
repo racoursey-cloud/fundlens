@@ -17,10 +17,12 @@
 //   /api/www4sec → https://www.sec.gov    — filing archives (XML documents)
 //
 // Primary document discovery:
-//   The submissions/CIK*.json response includes a `primaryDocument` array
-//   alongside `accessionNumber` and `form`. No separate index.json fetch needed.
-//   Index JSON files (e.g. {accession}-index.json) are not reliably present
-//   on www.sec.gov and should not be used.
+//   The submissions/CIK*.json response includes a `primaryDocument` array.
+//   The value sometimes contains an XSLT viewer subdirectory prefix, e.g.:
+//     "xslFormNPORT-P_X01/primary_doc.xml"
+//   The actual XML lives at the accession root without that prefix:
+//     "primary_doc.xml"
+//   Fix: strip everything before the last "/" → filename only.
 //
 // EDGAR archives path:
 //   Filings are stored under the FILER's CIK, not the fund's CIK.
@@ -119,10 +121,8 @@ async function getCik(ticker) {
 }
 
 // ── Latest NPORT-P accession + primary document name ─────────────────────────
-// The submissions API response includes `primaryDocument[]` alongside
-// `accessionNumber[]` and `form[]`. We read the primary XML filename here
-// so no separate index.json fetch is needed.
-// Returns { accession, primaryDoc } or null.
+// Returns { accession, primaryDoc } where primaryDoc is the bare filename
+// (no subdirectory prefix) ready to append to the archive URL.
 async function getLatestNportFiling(cik) {
   try {
     const data = await throttledSecRequest(() =>
@@ -137,9 +137,19 @@ async function getLatestNportFiling(cik) {
 
     for (let i = 0; i < forms.length; i++) {
       if (forms[i] === 'NPORT-P') {
+        const rawPrimaryDoc = primaryDocs[i] || '';
+
+        // The submissions API sometimes returns a path with an XSLT viewer
+        // subdirectory prefix, e.g. "xslFormNPORT-P_X01/primary_doc.xml".
+        // The actual XML lives at the accession root — strip everything up to
+        // and including the last "/" to get the bare filename.
+        const primaryDoc = rawPrimaryDoc.includes('/')
+          ? rawPrimaryDoc.split('/').pop()
+          : rawPrimaryDoc;
+
         return {
-          accession:  accessions[i],   // e.g. "0001410368-26-026282"
-          primaryDoc: primaryDocs[i],  // e.g. "primary_doc.xml"
+          accession:  accessions[i],  // e.g. "0001410368-26-026282"
+          primaryDoc,                 // e.g. "primary_doc.xml"
         };
       }
     }
@@ -312,8 +322,6 @@ export async function fetchHoldings(ticker, fundName) {
     return [];
   }
 
-  // Get accession number AND primary doc name from submissions API in one call.
-  // No separate index.json fetch needed — primaryDocument[] is in submissions.
   const filing = await getLatestNportFiling(cik);
   if (!filing) {
     console.warn(`[edgar] No NPORT-P filing found for ${ticker} (CIK ${cik})`);
@@ -335,6 +343,8 @@ export async function fetchHoldings(ticker, fundName) {
     const accessionClean = accession.replace(/-/g, '');
     const filerCik       = String(parseInt(accession.split('-')[0], 10));
     const xmlUrl         = `/api/www4sec/Archives/edgar/data/${filerCik}/${accessionClean}/${primaryDoc}`;
+
+    console.log(`[edgar] Fetching NPORT-P XML for ${ticker}: ${xmlUrl}`);
 
     const xmlText = await throttledSecRequest(() =>
       fetch(xmlUrl).then(r => {
