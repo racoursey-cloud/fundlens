@@ -54,12 +54,23 @@ async function loadCikMap() {
       const data = await fetchSEC('/files/company_tickers_mf.json');
       const parsed = typeof data === 'string' ? JSON.parse(data) : data;
       const map = new Map();
-      // Format: { "0": { "cik": 1234, "seriesId": "S000...", "classId": "C000...", "symbol": "FXAIX" }, ... }
-      const entries = parsed?.data ?? Object.values(parsed);
-      for (const entry of entries) {
-        const sym = (entry.symbol || '').toUpperCase().trim();
-        if (sym && entry.cik) {
-          map.set(sym, String(entry.cik));
+      // Primary format: { "fields": ["cik","seriesId","classId","symbol"], "data": [[12345,"S000...","C000...","FXAIX"], ...] }
+      // Fallback format: { "0": { "cik": 1234, "symbol": "FXAIX", ... }, ... }
+      if (parsed?.fields && Array.isArray(parsed.data)) {
+        const fi = {};
+        parsed.fields.forEach((f, i) => { fi[f] = i; });
+        const cikIdx = fi['cik'] ?? fi['CIK'] ?? 0;
+        const symIdx = fi['symbol'] ?? fi['SYMBOL'] ?? 3;
+        for (const row of parsed.data) {
+          const sym = String(row[symIdx] || '').toUpperCase().trim();
+          const cik = row[cikIdx];
+          if (sym && cik) map.set(sym, String(cik));
+        }
+      } else {
+        const entries = Object.values(parsed);
+        for (const entry of entries) {
+          const sym = (entry.symbol || '').toUpperCase().trim();
+          if (sym && entry.cik) map.set(sym, String(entry.cik));
         }
       }
       console.log(`[edgar] Loaded CIK map: ${map.size} mutual fund tickers`);
