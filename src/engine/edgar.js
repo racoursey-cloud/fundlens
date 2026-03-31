@@ -12,6 +12,15 @@
 //   Claude calls route through /api/claude (Railway proxy).
 // - Never throws — returns [] on any unrecoverable failure.
 //
+// EDGAR archives path notes (important):
+// - Filings are stored under the FILER's CIK, not the fund's own CIK.
+//   e.g. FXAIX (fund CIK 819118) is filed by Fidelity Management (CIK 35402);
+//   the archives path uses 35402, not 819118.
+//   The filer CIK is the first 10-digit segment of the accession number:
+//     "0000035402-26-002126" → filer CIK = 35402
+// - The primary NPORT-P document is an XML file whose name varies per filer.
+//   We discover it by fetching the filing's index JSON first.
+//
 // Output shape (array of holding objects):
 // {
 //   ticker:    string,   — holding ticker / CUSIP identifier
@@ -146,27 +155,58 @@ async function getLatestNportAccession(cik) {
   }
 }
 
-// ── Parse holdings from NPORT-P JSON ─────────────────────────────────────────
-// EDGAR serves NPORT-P as structured JSON via the XBRL viewer endpoint.
-// We extract invstOrSecs (investments or securities) array.
-function parseHoldings(nportData, totalNav) {
+// ── Parse holdings from NPORT-P XML ──────────────────────────────────────────
+// Uses DOMParser (browser-native) to extract invstOrSec elements.
+// NPORT-P XML schema: each holding is an <invstOrSec> with child elements
+// for name, identifiers (ticker/isin/cusip), assetCat, valUSD, pctVal.
+function parseHoldingsFromXml(xmlText) {
   try {
-    const investments = nportData?.formData?.invstOrSecs ?? [];
-    const holdings = [];
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(xmlText, 'application/xml');
 
-    for (const inv of investments) {
-      const name     = inv?.name ?? '';
-      const ticker   = inv?.ticker ?? inv?.isin ?? inv?.cusip ?? '';
-      const assetCat = (inv?.assetCat ?? 'OTH').toUpperCase();
-      const value    = parseFloat(inv?.valUSD ?? inv?.fairValUSD ?? 0);
-      const weight   = totalNav > 0 ? (value / totalNav) * 100 : 0;
+    // Abort on malformed XML
+    if (doc.querySelector('parsererror')) {
+      console.warn('[edgar] XML parse error in NPORT-P document');
+      return [];
+    }
+
+    // Total assets for weight calculation
+    const totAssetsEl =
+      doc.querySelector('totAssets') ||
+      doc.querySelector('totalAssets');
+    const totalNav = totAssetsEl ? parseFloat(totAssetsEl.textContent) : 0;
+
+    const holdings = [];
+    const invstEls = doc.querySelectorAll('invstOrSec');
+
+    for (const inv of invstEls) {
+      const name = inv.querySelector('name')?.textContent?.trim() || '';
+
+      // Ticker lookup order: identifiers block → direct ticker → isin → cusip
+      const ticker =
+        inv.querySelector('identifiers ticker')?.textContent?.trim() ||
+        inv.querySelector('ticker')?.textContent?.trim() ||
+        inv.querySelector('isin')?.textContent?.trim() ||
+        inv.querySelector('cusip')?.textContent?.trim() ||
+        '';
+
+      const assetCat = (inv.querySelector('assetCat')?.textContent?.trim() || 'OTH').toUpperCase();
+
+      const valUSD = parseFloat(inv.querySelector('valUSD')?.textContent || '0');
+      const pctVal = parseFloat(inv.querySelector('pctVal')?.textContent || '0');
+
+      // Prefer valUSD for value; use pctVal directly as weight when NAV unavailable
+      const value  = !isNaN(valUSD) && valUSD > 0 ? valUSD : 0;
+      const weight = totalNav > 0 && value > 0
+        ? (value / totalNav) * 100
+        : (!isNaN(pctVal) ? pctVal : 0);
 
       if (!name && !ticker) continue;
-      if (value <= 0) continue;
+      if (value <= 0 && weight <= 0) continue;
 
       holdings.push({
-        ticker:   ticker.trim(),
-        name:     name.trim(),
+        ticker:   ticker,
+        name:     name,
         assetCat,
         weight:   Math.round(weight * 10000) / 10000,
         value:    Math.round(value * 100) / 100,
@@ -175,11 +215,10 @@ function parseHoldings(nportData, totalNav) {
       });
     }
 
-    // Sort by weight descending
     holdings.sort((a, b) => b.weight - a.weight);
     return holdings;
   } catch (err) {
-    console.warn('[edgar] Holdings parse failed:', err.message);
+    console.warn('[edgar] XML holdings parse failed:', err.message);
     return [];
   }
 }
@@ -310,30 +349,58 @@ export async function fetchHoldings(ticker, fundName) {
     return [];
   }
 
-  // Fetch NPORT-P filing data
-  // FIX (2026-03): Path was "/archives/{paddedCIK}/{accession}/xbrl_data.json"
-  // which is wrong in two ways: (1) lowercase "archives" — data.sec.gov S3 is
-  // case-sensitive and the bucket uses "Archives"; (2) missing "edgar/data/"
-  // segment — the correct archives path is /Archives/edgar/data/{CIK}/{accession}/.
-  // CIK must have leading zeros stripped for the edgar/data/ path (unlike
-  // the submissions API which uses the padded form).
+  // ── Fetch NPORT-P filing data ───────────────────────────────────────────
+  // EDGAR archives files under the FILER's CIK, not the fund's own CIK.
+  // The filer CIK is the first numeric segment of the accession number:
+  //   "0000035402-26-002126" → filerCik = "35402"
+  // FXAIX (fund CIK 819118) is filed by Fidelity Management (CIK 35402),
+  // so the archives path uses 35402. Using the fund CIK gives 404 every time.
+  //
+  // The primary holdings document is an XML file with a filer-specific name
+  // (e.g. "primary_doc.xml", "nportholdings.xml"). We discover the filename
+  // from the filing's index JSON, then fetch and parse the XML with DOMParser.
+  // xbrl_data.json is not a real EDGAR file and never existed.
   let holdings = [];
   try {
     const accessionClean = accession.replace(/-/g, '');
-    const cikStripped    = String(parseInt(cik, 10)); // remove leading zeros
-    const nportData = await throttledSecRequest(() =>
-      fetchEdgar(
-        `/Archives/edgar/data/${cikStripped}/${accessionClean}/xbrl_data.json`
-      )
+    const filerCik       = String(parseInt(accession.split('-')[0], 10));
+
+    // Step 1: Fetch filing index JSON to find the primary XML document name.
+    // Index path: /Archives/edgar/data/{filerCik}/{accNoDash}/{accWithDash}-index.json
+    let primaryDocName = null;
+    try {
+      const indexData = await throttledSecRequest(() =>
+        fetchEdgar(`/Archives/edgar/data/${filerCik}/${accessionClean}/${accession}-index.json`)
+      );
+      const files = Array.isArray(indexData?.files) ? indexData.files : [];
+      // Primary doc: type "NPORT-P", or first .xml that is not a schema (.xsd)
+      const primary = files.find(f =>
+        f.type === 'NPORT-P' ||
+        (f.name && /\.xml$/i.test(f.name) && !/\.xsd$/i.test(f.name))
+      );
+      primaryDocName = primary?.name || null;
+    } catch (err) {
+      console.warn(`[edgar] Index fetch failed for ${ticker} (filer ${filerCik}/${accessionClean}):`, err.message);
+    }
+
+    if (!primaryDocName) {
+      console.warn(`[edgar] No primary XML found in filing index for ${ticker} (filer ${filerCik})`);
+      return [];
+    }
+
+    // Step 2: Fetch the primary XML as raw text via the /api/edgar proxy.
+    // fetchEdgar always parses JSON so we use raw fetch here for text/xml.
+    const xmlText = await throttledSecRequest(() =>
+      fetch(`/api/edgar/Archives/edgar/data/${filerCik}/${accessionClean}/${primaryDocName}`)
+        .then(r => {
+          if (!r.ok) throw new Error(`HTTP ${r.status}`);
+          return r.text();
+        })
     );
 
-    // Extract total NAV for weight calculation
-    const totalNav = parseFloat(
-      nportData?.formData?.genInfo?.totalAssets ??
-      nportData?.formData?.fundInfo?.totAssets ?? 0
-    );
+    // Step 3: Parse NPORT-P XML holdings with DOMParser.
+    holdings = parseHoldingsFromXml(xmlText);
 
-    holdings = parseHoldings(nportData, totalNav);
   } catch (err) {
     console.warn(`[edgar] NPORT-P fetch failed for ${ticker} (accession ${accession}):`, err.message);
     return [];
