@@ -32,13 +32,20 @@ const MIN_EQUITY_WEIGHT  = 0.1; // % -- skip sector lookup for tiny equity posit
 
 // -- SEC rate limiter ---------------------------------------------------------
 // SEC blocks IPs that make too many concurrent requests. This simple queue
-// ensures at most 2 SEC requests in flight at once, with a 600ms gap between.
+// ensures at most 1 SEC request in flight at once, with a 600ms gap between.
+//
+// FIX (2026-03): The original implementation returned `secQueue` directly,
+// which meant any one failed request would poison every subsequent queued
+// promise with the same rejection reason. Each caller now gets their own
+// independent `result` promise. The shared queue absorbs failures via
+// .catch(() => {}) so the chain always advances regardless of individual errors.
 let secQueue = Promise.resolve();
 function throttledSecRequest(fn) {
-  secQueue = secQueue.then(() =>
-    fn().finally(() => new Promise(r => setTimeout(r, 600)))
-  );
-  return secQueue;
+  const result = secQueue.then(() => fn());
+  secQueue = result
+    .catch(() => {})  // absorb error so the queue always continues
+    .finally(() => new Promise(r => setTimeout(r, 600)));
+  return result;
 }
 
 // -- company_tickers_mf.json cache -------------------------------------------
@@ -304,12 +311,19 @@ export async function fetchHoldings(ticker, fundName) {
   }
 
   // Fetch NPORT-P filing data
+  // FIX (2026-03): Path was "/archives/{paddedCIK}/{accession}/xbrl_data.json"
+  // which is wrong in two ways: (1) lowercase "archives" — data.sec.gov S3 is
+  // case-sensitive and the bucket uses "Archives"; (2) missing "edgar/data/"
+  // segment — the correct archives path is /Archives/edgar/data/{CIK}/{accession}/.
+  // CIK must have leading zeros stripped for the edgar/data/ path (unlike
+  // the submissions API which uses the padded form).
   let holdings = [];
   try {
     const accessionClean = accession.replace(/-/g, '');
+    const cikStripped    = String(parseInt(cik, 10)); // remove leading zeros
     const nportData = await throttledSecRequest(() =>
       fetchEdgar(
-        `/archives/${cik.padStart(10, '0')}/${accessionClean}/xbrl_data.json`
+        `/Archives/edgar/data/${cikStripped}/${accessionClean}/xbrl_data.json`
       )
     );
 
