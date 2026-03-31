@@ -257,9 +257,38 @@ export default function PortfolioTab() {
     [allocatedFunds]
   );
 
-  // ── Slider change handler ───────────────────────────────────────────────
+  // ── Slider change handlers ──────────────────────────────────────────────
+
+  // Auto-normalizing weight handler: when factor K moves to V, the other
+  // three weights are scaled proportionally so the total always stays at 100.
   const handleWeightChange = useCallback((key, val) => {
-    const next = { ...weights, [key]: val };
+    const remaining  = 100 - val;
+    const otherKeys  = Object.keys(weights).filter(k => k !== key);
+    const otherSum   = otherKeys.reduce((sum, k) => sum + weights[k], 0);
+
+    // Scale the other three weights proportionally (or split evenly if all zero)
+    const scaled = {};
+    if (otherSum > 0) {
+      for (const k of otherKeys) {
+        scaled[k] = Math.round(weights[k] * remaining / otherSum);
+      }
+    } else {
+      const share = Math.floor(remaining / otherKeys.length);
+      for (const k of otherKeys) {
+        scaled[k] = share;
+      }
+    }
+
+    // Absorb rounding error into the largest "other" weight so total = exactly 100
+    const scaledTotal = val + otherKeys.reduce((s, k) => s + scaled[k], 0);
+    const diff = 100 - scaledTotal;
+    if (diff !== 0) {
+      // Find the key with the largest scaled value to absorb the rounding delta
+      const largest = otherKeys.reduce((best, k) => scaled[k] > scaled[best] ? k : best, otherKeys[0]);
+      scaled[largest] += diff;
+    }
+
+    const next = { ...scaled, [key]: val };
     setWeights(next);
     rescoreAction(next);
   }, [weights, rescoreAction]);
@@ -418,6 +447,23 @@ export default function PortfolioTab() {
               onChange={val => handleWeightChange(key, val)}
             />
           ))}
+
+          {/* Weight sum indicator */}
+          <div style={{
+            display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: 6,
+            paddingTop: 4, borderTop: `1px solid ${T.border}`,
+          }}>
+            <span style={{ fontSize: 11, color: T.textMuted }}>Total:</span>
+            <span style={{
+              fontSize: 12, fontWeight: 700, fontVariantNumeric: 'tabular-nums',
+              color: Object.values(weights).reduce((s, v) => s + v, 0) === 100
+                ? '#22c55e'
+                : '#ef4444',
+            }}>
+              {Object.values(weights).reduce((s, v) => s + v, 0)}
+            </span>
+          </div>
+
           <button
             onClick={() => {
               setWeights({ ...DEFAULT_WEIGHTS });
