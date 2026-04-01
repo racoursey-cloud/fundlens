@@ -1,376 +1,484 @@
-// FundLens v4 — EDGAR holdings engine
-// Fetches the most recent NPORT-P holdings for a fund from SEC EDGAR.
-// Sector mappings are resolved via Claude and cached separately.
+// src/engine/edgar.js
+// Fetches fund holdings from SEC EDGAR NPORT-P filings for all fund tickers.
+// Results are cached in Supabase holdings_cache (15-day TTL).
 //
-// Architecture notes:
-// - MONEY_MARKET_FUNDS are skipped entirely — no EDGAR call, returns [].
-// - Holdings cache TTL: 15 days (NPORT-P filed within 60 days of month-end;
-//   15 days catches a new filing within two weeks of it appearing on EDGAR).
-// - Sector mapping cache: indefinite (sector_mappings table, no TTL). A stock's
-//   GICS sector almost never changes; manual cache invalidation if needed.
-// - Claude is used only for sector classification when a ticker is not in cache.
-//   Claude calls route through /api/claude (Railway proxy).
-// - Never throws — returns [] on any unrecoverable failure.
+// 3-strategy CIK resolution per ticker:
+//   1. MF tickers file  — /api/www4sec/files/company_tickers_mf.json (array-of-arrays)
+//   2. EFTS full-text search — /api/efts/LATEST/search-index
+//   3. Skip (log warning, return empty)
 //
-// EDGAR proxy routing (two different hosts):
-//   /api/edgar   → https://data.sec.gov   — submissions JSON, CIK maps
-//   /api/www4sec → https://www.sec.gov    — filing archives (XML documents)
-//
-// Primary document discovery:
-//   The submissions/CIK*.json response includes a `primaryDocument` array.
-//   The value sometimes contains an XSLT viewer subdirectory prefix, e.g.:
-//     "xslFormNPORT-P_X01/primary_doc.xml"
-//   The actual XML lives at the accession root without that prefix:
-//     "primary_doc.xml"
-//   Fix: strip everything before the last "/" → filename only.
-//
-// EDGAR archives path:
-//   Filings are stored under the FILER's CIK, not the fund's CIK.
-//   Filer CIK = first numeric segment of the accession number:
-//     "0000035402-26-002126" → filer CIK = 35402
-//
-// Output shape (array of holding objects):
-// {
-//   ticker:    string,   — holding ticker / CUSIP identifier
-//   name:      string,   — issuer name from NPORT-P
-//   assetCat:  string,   — EC | DBT | STIV | RF | OTH
-//   weight:    number,   — % of fund NAV (0–100)
-//   value:     number,   — fair value in USD
-//   sector:    string,   — GICS sector (null for non-equity)
-//   industry:  string,   — sub-industry (null for non-equity)
-// }
+// ⚠️  All Supabase calls route through cache.js helpers (supaFetch under the hood).
+// ⚠️  No localStorage. No direct Supabase calls.
+// ⚠️  300ms delay between tickers (SEC rate ~10 req/sec).
+// ⚠️  CRITICAL: company_tickers_mf.json uses { fields, data } array-of-arrays
+//     format — iterate data[][] using field index positions, NOT object keys.
 
-import { CLAUDE_MODEL, MONEY_MARKET_FUNDS, GICS_SECTORS } from './constants.js';
-import { getHoldings, setHoldings, getSectorMapping, setSectorMapping } from '../services/cache.js';
-import { fetchEdgar, fetchSEC } from '../services/api.js';
+import { getHoldings, saveHoldings } from '../services/cache.js';
+import { MONEY_MARKET_TICKERS }       from './constants.js';
 
-const SECTOR_BATCH_SIZE  = 20;  // Max tickers sent to Claude per sector request
-const MIN_EQUITY_WEIGHT  = 0.1; // % -- skip sector lookup for tiny equity positions
+// ---------------------------------------------------------------------------
+// Internal helpers
+// ---------------------------------------------------------------------------
 
-// -- SEC rate limiter ---------------------------------------------------------
-// Each caller gets its own independent `result` promise. The shared queue
-// absorbs failures so the chain always advances.
-let secQueue = Promise.resolve();
-function throttledSecRequest(fn) {
-  const result = secQueue.then(() => fn());
-  secQueue = result
-    .catch(() => {})
-    .finally(() => new Promise(r => setTimeout(r, 600)));
-  return result;
+const DELAY_MS = 300;
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-// -- company_tickers_mf.json cache -------------------------------------------
-let cikMapPromise = null;
+/**
+ * Zero-pads a CIK to 10 digits and prepends "CIK".
+ * e.g. "12345" → "CIK0000012345"
+ */
+function formatCIK(cik) {
+  return 'CIK' + String(cik).replace(/^CIK/i, '').padStart(10, '0');
+}
 
-async function loadCikMap() {
-  if (cikMapPromise) return cikMapPromise;
-  cikMapPromise = (async () => {
-    try {
-      const data = await fetchSEC('/files/company_tickers_mf.json');
-      const parsed = typeof data === 'string' ? JSON.parse(data) : data;
-      const map = new Map();
-      if (parsed?.fields && Array.isArray(parsed.data)) {
-        const fi = {};
-        parsed.fields.forEach((f, i) => { fi[f] = i; });
-        const cikIdx = fi['cik'] ?? fi['CIK'] ?? 0;
-        const symIdx = fi['symbol'] ?? fi['SYMBOL'] ?? 3;
-        for (const row of parsed.data) {
-          const sym = String(row[symIdx] || '').toUpperCase().trim();
-          const cik = row[cikIdx];
-          if (sym && cik) map.set(sym, String(cik));
-        }
+/**
+ * Strips the "CIK" prefix and any leading zeros to get the bare numeric CIK.
+ * e.g. "CIK0000012345" → "12345"
+ */
+function bareCIK(cik) {
+  return String(cik).replace(/^CIK0*/i, '') || '0';
+}
+
+/**
+ * Removes dashes from an accession number.
+ * e.g. "0001234567-23-001234" → "000123456723001234"
+ */
+function stripDashes(accNo) {
+  return accNo.replace(/-/g, '');
+}
+
+/**
+ * Reads a single text value from the first matching XML element.
+ */
+function xmlText(parent, tagName) {
+  const el = parent.querySelector(tagName);
+  return el ? (el.textContent || '').trim() : null;
+}
+
+// ---------------------------------------------------------------------------
+// Module-level CIK map cache (loaded once per session)
+// ---------------------------------------------------------------------------
+
+let _cikMapCache = null;  // Map<string, string>  ticker (uppercase) → CIK string
+
+/**
+ * Loads the SEC mutual fund CIK map from the Railway proxy (once per session).
+ *
+ * The endpoint returns one of two formats:
+ *
+ *   Format A (array-of-arrays) — the primary format:
+ *     { "fields": ["cik_str", "ticker", "title", ...], "data": [[12345, "FXAIX", ...], ...] }
+ *
+ *   Format B (object-of-objects) — legacy fallback:
+ *     { "0": { "cik_str": 12345, "ticker": "FXAIX", ... }, "1": { ... }, ... }
+ *
+ * Returns a Map<TICKER_UPPERCASE, CIK_STRING>.
+ */
+async function loadCIKMap() {
+  if (_cikMapCache) return _cikMapCache;
+
+  const map = new Map();
+
+  try {
+    const res = await fetch('/api/www4sec/files/company_tickers_mf.json');
+    if (!res.ok) {
+      console.warn(`[edgar] CIK map fetch failed — HTTP ${res.status}`);
+      _cikMapCache = map;
+      return map;
+    }
+
+    const json = await res.json();
+
+    // ── Format A: { fields: [...], data: [[...], ...] } ──────────────────
+    if (Array.isArray(json.fields) && Array.isArray(json.data)) {
+      const fields = json.fields.map(f => String(f).toLowerCase());
+      const cikIdx    = fields.indexOf('cik_str');
+      const tickerIdx = fields.indexOf('ticker');
+
+      if (cikIdx === -1 || tickerIdx === -1) {
+        console.warn('[edgar] CIK map fields missing cik_str or ticker:', fields);
       } else {
-        const entries = Object.values(parsed);
-        for (const entry of entries) {
-          const sym = (entry.symbol || '').toUpperCase().trim();
-          if (sym && entry.cik) map.set(sym, String(entry.cik));
+        for (const row of json.data) {
+          if (!Array.isArray(row)) continue;
+          const cik    = row[cikIdx];
+          const ticker = row[tickerIdx];
+          if (cik != null && ticker) {
+            map.set(String(ticker).toUpperCase(), String(cik));
+          }
         }
       }
-      console.log(`[edgar] Loaded CIK map: ${map.size} mutual fund tickers`);
+
+      console.log(`[edgar] CIK map loaded (array format): ${map.size} entries`);
+      _cikMapCache = map;
       return map;
-    } catch (err) {
-      console.warn('[edgar] Failed to load company_tickers_mf.json:', err.message);
-      return new Map();
     }
-  })();
-  return cikMapPromise;
-}
 
-// -- CIK lookup ---------------------------------------------------------------
-async function getCik(ticker) {
-  const cikMap = await loadCikMap();
-  const mapped = cikMap.get(ticker.toUpperCase());
-  if (mapped) return mapped;
+    // ── Format B: { "0": { cik_str, ticker, ... }, ... } ─────────────────
+    if (typeof json === 'object' && json !== null) {
+      for (const entry of Object.values(json)) {
+        const cik    = entry.cik_str ?? entry.cik;
+        const ticker = entry.ticker;
+        if (cik != null && ticker) {
+          map.set(String(ticker).toUpperCase(), String(cik));
+        }
+      }
 
-  try {
-    const xml = await throttledSecRequest(() =>
-      fetchSEC(
-        `/cgi-bin/browse-edgar?action=getcompany&CIK=${encodeURIComponent(ticker)}&type=NPORT-P&dateb=&owner=include&count=1&search_text=&output=atom`
-      )
-    );
-    const cikMatch = xml.match(/<cik[^>]*>0*(\d+)<\/cik>/i);
-    if (cikMatch) return cikMatch[1];
-    const linkMatch = xml.match(/CIK=0*(\d+)/);
-    if (linkMatch) return linkMatch[1];
+      console.log(`[edgar] CIK map loaded (object format): ${map.size} entries`);
+      _cikMapCache = map;
+      return map;
+    }
+
+    console.warn('[edgar] CIK map unrecognised format:', typeof json);
   } catch (err) {
-    console.warn(`[edgar] browse-edgar fallback failed for ${ticker}:`, err.message);
+    console.warn('[edgar] CIK map load error:', err.message);
   }
 
-  console.warn(`[edgar] Could not resolve CIK for ${ticker}`);
-  return null;
+  _cikMapCache = map;
+  return map;
 }
 
-// ── Latest NPORT-P accession + primary document name ─────────────────────────
-// Returns { accession, primaryDoc } where primaryDoc is the bare filename
-// (no subdirectory prefix) ready to append to the archive URL.
-async function getLatestNportFiling(cik) {
+// ---------------------------------------------------------------------------
+// CIK resolution via EFTS full-text search (fallback)
+// ---------------------------------------------------------------------------
+
+/**
+ * Attempts to find a CIK for `ticker` via EFTS full-text search for NPORT-P.
+ * Returns a CIK string or null.
+ */
+async function resolveCIKviaEFTS(ticker) {
   try {
-    const data = await throttledSecRequest(() =>
-      fetchEdgar(`/submissions/CIK${cik.padStart(10, '0')}.json`)
-    );
-    const filings = data?.filings?.recent;
-    if (!filings) return null;
+    const url = `/api/efts/LATEST/search-index?q=%22${encodeURIComponent(ticker)}%22&forms=NPORT-P`;
+    const res = await fetch(url);
+    if (!res.ok) return null;
 
-    const forms       = filings.form            ?? [];
-    const accessions  = filings.accessionNumber ?? [];
-    const primaryDocs = filings.primaryDocument  ?? [];
+    const json = await res.json();
 
+    // EFTS returns { hits: { hits: [{ _source: { period_of_report, entity_name, file_num, ... }, _id: "..." }, ...] } }
+    // The CIK is embedded in the accession number or in _source fields.
+    const hits = json?.hits?.hits ?? json?.hits ?? [];
+    if (!Array.isArray(hits) || hits.length === 0) return null;
+
+    const first = hits[0];
+
+    // Try _source.entity_id or _source.period_of_report as a CIK clue.
+    // Most reliable: extract CIK from the accession number (_id or file_date).
+    // Accession numbers are formatted as {cik}-{year}-{seq}.
+    const id = first._id ?? first.accession_no ?? '';
+    const match = String(id).match(/^(\d+)-\d{2}-\d+/);
+    if (match) return match[1];
+
+    // Secondary: check _source directly
+    const src = first._source ?? first;
+    if (src.cik)    return String(src.cik);
+    if (src.cik_str) return String(src.cik_str);
+
+    return null;
+  } catch (err) {
+    console.warn(`[edgar] EFTS CIK lookup failed for ${ticker}:`, err.message);
+    return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// NPORT-P submission lookup
+// ---------------------------------------------------------------------------
+
+/**
+ * Fetches the submissions JSON for a CIK and returns the most recent NPORT-P
+ * accession number (with dashes, e.g. "0001234567-23-001234"), or null.
+ */
+async function fetchLatestNportAccNo(cik) {
+  try {
+    const paddedCIK = formatCIK(cik);
+    const url = `/api/edgar/submissions/${paddedCIK}.json`;
+    const res = await fetch(url);
+    if (!res.ok) return null;
+
+    const json = await res.json();
+    const recent = json?.filings?.recent;
+    if (!recent) return null;
+
+    const forms      = recent.form        ?? [];
+    const accNumbers = recent.accessionNumber ?? [];
+
+    // Walk forms array to find the first NPORT-P
     for (let i = 0; i < forms.length; i++) {
       if (forms[i] === 'NPORT-P') {
-        const rawPrimaryDoc = primaryDocs[i] || '';
-
-        // The submissions API sometimes returns a path with an XSLT viewer
-        // subdirectory prefix, e.g. "xslFormNPORT-P_X01/primary_doc.xml".
-        // The actual XML lives at the accession root — strip everything up to
-        // and including the last "/" to get the bare filename.
-        const primaryDoc = rawPrimaryDoc.includes('/')
-          ? rawPrimaryDoc.split('/').pop()
-          : rawPrimaryDoc;
-
-        return {
-          accession:  accessions[i],  // e.g. "0001410368-26-026282"
-          primaryDoc,                 // e.g. "primary_doc.xml"
-        };
+        return accNumbers[i] ?? null;
       }
     }
     return null;
   } catch (err) {
-    console.warn(`[edgar] Submissions lookup failed for CIK ${cik}:`, err.message);
+    console.warn(`[edgar] submissions fetch error for CIK ${cik}:`, err.message);
     return null;
   }
 }
 
-// ── Parse holdings from NPORT-P XML ──────────────────────────────────────────
-function parseHoldingsFromXml(xmlText) {
-  try {
-    const parser = new DOMParser();
-    const doc = parser.parseFromString(xmlText, 'application/xml');
+// ---------------------------------------------------------------------------
+// NPORT-P filing index + XML fetch
+// ---------------------------------------------------------------------------
 
-    if (doc.querySelector('parsererror')) {
-      console.warn('[edgar] XML parse error in NPORT-P document');
+/**
+ * Fetches the EDGAR filing index HTML for the given CIK + accession number
+ * and returns the URL of the primary NPORT-P XML document, or null.
+ *
+ * Index page:  /Archives/edgar/data/{cik}/{accNoDashes}/
+ * We look for .xml files and prefer the one that is NOT the schema/cal/pre/lab
+ * (i.e. the primary report document).
+ */
+async function fetchPrimaryXmlUrl(cik, accNoDashes) {
+  try {
+    const bare = bareCIK(cik);
+    const indexUrl = `/api/www4sec/Archives/edgar/data/${bare}/${accNoDashes}/`;
+    const res = await fetch(indexUrl);
+    if (!res.ok) return null;
+
+    const html = await res.text();
+
+    // Parse the directory listing HTML for .xml links.
+    const parser = new DOMParser();
+    const doc    = parser.parseFromString(html, 'text/html');
+
+    const links = Array.from(doc.querySelectorAll('a[href]'))
+      .map(a => a.getAttribute('href'))
+      .filter(href => href && href.toLowerCase().endsWith('.xml'));
+
+    if (links.length === 0) return null;
+
+    // Prefer the primary NPORT document.
+    // Scoring heuristic (higher = better):
+    //   - name contains "nport" or "primary" or matches accession basename → top
+    //   - shorter names are often the primary document
+    //   - avoid schema files (_cal, _lab, _pre, _def)
+    const scored = links.map(href => {
+      const name = href.split('/').pop().toLowerCase();
+      let score = 0;
+      if (name.includes('nport'))    score += 10;
+      if (name.includes('primary'))  score += 8;
+      if (name.includes('_cal') || name.includes('_lab') ||
+          name.includes('_pre') || name.includes('_def')) score -= 20;
+      // Prefer shorter filenames (the main report is often just {accno}.xml)
+      score -= name.length * 0.1;
+      return { href, score };
+    });
+
+    scored.sort((a, b) => b.score - a.score);
+    const best = scored[0].href;
+
+    // Resolve relative URL: if href is absolute use as-is, else prepend base.
+    if (best.startsWith('http')) return best;
+    if (best.startsWith('/')) return `/api/www4sec${best}`;
+    return `${indexUrl}${best}`;
+  } catch (err) {
+    console.warn(`[edgar] index fetch error for ${cik}/${accNoDashes}:`, err.message);
+    return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// NPORT-P XML parser
+// ---------------------------------------------------------------------------
+
+/**
+ * Fetches and parses a NPORT-P XML document.
+ * Returns an array of holding objects sorted by pctVal descending (top 200).
+ *
+ * Each holding:
+ *   { holding_name, holding_ticker, weight, market_value, asset_type, sector }
+ *
+ * pctVal is already a percentage (5.2 = 5.2% — stored as weight directly).
+ */
+async function parseNportXml(xmlUrl) {
+  try {
+    const res = await fetch(xmlUrl);
+    if (!res.ok) return [];
+
+    const text = await res.text();
+    if (!text || text.length < 100) return [];
+
+    const parser  = new DOMParser();
+    const xmlDoc  = parser.parseFromString(text, 'text/xml');
+
+    // Check for parse errors
+    const parseErr = xmlDoc.querySelector('parsererror');
+    if (parseErr) {
+      console.warn('[edgar] XML parse error:', parseErr.textContent?.slice(0, 200));
       return [];
     }
 
-    const totAssetsEl =
-      doc.querySelector('totAssets') ||
-      doc.querySelector('totalAssets');
-    const totalNav = totAssetsEl ? parseFloat(totAssetsEl.textContent) : 0;
+    // <invstOrSec> blocks contain individual holdings
+    const securities = xmlDoc.querySelectorAll('invstOrSec');
+    if (!securities || securities.length === 0) return [];
 
     const holdings = [];
-    const invstEls = doc.querySelectorAll('invstOrSec');
 
-    for (const inv of invstEls) {
-      const name = inv.querySelector('name')?.textContent?.trim() || '';
+    for (const sec of securities) {
+      const name       = xmlText(sec, 'name');
+      const pctValStr  = xmlText(sec, 'pctVal');
+      const valUSDStr  = xmlText(sec, 'valUSD');
+      const assetCat   = xmlText(sec, 'assetCat');
 
-      const ticker =
-        inv.querySelector('identifiers ticker')?.textContent?.trim() ||
-        inv.querySelector('ticker')?.textContent?.trim() ||
-        inv.querySelector('isin')?.textContent?.trim() ||
-        inv.querySelector('cusip')?.textContent?.trim() ||
-        '';
+      // Ticker lives inside <identifiers><ticker> or <ticker>
+      const identifiers   = sec.querySelector('identifiers');
+      const tickerEl      = identifiers
+        ? identifiers.querySelector('ticker')
+        : sec.querySelector('ticker');
+      const holdingTicker = tickerEl ? tickerEl.textContent.trim() : null;
 
-      const assetCat = (inv.querySelector('assetCat')?.textContent?.trim() || 'OTH').toUpperCase();
+      const pctVal  = pctValStr  ? parseFloat(pctValStr)  : null;
+      const valUSD  = valUSDStr  ? parseFloat(valUSDStr)  : null;
 
-      const valUSD = parseFloat(inv.querySelector('valUSD')?.textContent || '0');
-      const pctVal = parseFloat(inv.querySelector('pctVal')?.textContent || '0');
-
-      const value  = !isNaN(valUSD) && valUSD > 0 ? valUSD : 0;
-      const weight = totalNav > 0 && value > 0
-        ? (value / totalNav) * 100
-        : (!isNaN(pctVal) ? pctVal : 0);
-
-      if (!name && !ticker) continue;
-      if (value <= 0 && weight <= 0) continue;
+      // Skip rows with no name or weight
+      if (!name || pctVal == null || isNaN(pctVal)) continue;
 
       holdings.push({
-        ticker,
-        name,
-        assetCat,
-        weight: Math.round(weight * 10000) / 10000,
-        value:  Math.round(value * 100) / 100,
-        sector:   null,
-        industry: null,
+        holding_name:   name,
+        holding_ticker: holdingTicker || null,
+        weight:         pctVal,
+        market_value:   (!isNaN(valUSD) ? valUSD : null),
+        asset_type:     assetCat || null,
+        sector:         null,  // sector enriched later by sector mapping engine
       });
     }
 
-    holdings.sort((a, b) => b.weight - a.weight);
-    return holdings;
+    // Sort by weight descending, take top 200
+    holdings.sort((a, b) => (b.weight ?? 0) - (a.weight ?? 0));
+    return holdings.slice(0, 200);
   } catch (err) {
-    console.warn('[edgar] XML holdings parse failed:', err.message);
+    console.warn('[edgar] XML fetch/parse error:', err.message);
     return [];
   }
 }
 
-// ── Sector classification via Claude ─────────────────────────────────────────
-async function classifySectorsBatch(tickers) {
-  if (!tickers.length) return {};
+// ---------------------------------------------------------------------------
+// Per-ticker fetch orchestrator
+// ---------------------------------------------------------------------------
 
-  const knownSectors = Object.keys(GICS_SECTORS).join(', ');
-  const prompt = `You are a financial data assistant. Classify each stock ticker into its GICS sector.
+/**
+ * Fetches NPORT-P holdings for a single ticker.
+ * Tries CIK map → submissions → archive XML.
+ * Falls back to EFTS if CIK not found in map.
+ * Returns an array of holding objects (may be empty on failure).
+ */
+async function fetchHoldingsForTicker(ticker, cikMap) {
+  // ── 1. Look up CIK from the MF tickers map ───────────────────────────────
+  let cik = cikMap.get(ticker.toUpperCase()) ?? null;
 
-Valid sectors: ${knownSectors}
-
-Tickers to classify: ${tickers.join(', ')}
-
-Respond ONLY with a JSON object mapping each ticker to its sector. No preamble, no markdown.
-If a ticker is unknown or not a stock, use null.
-
-Example: { "AAPL": "Technology", "JPM": "Financials", "XYZ_UNKNOWN": null }`;
-
-  try {
-    const res = await fetch('/api/claude', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model:      CLAUDE_MODEL,
-        max_tokens: 1000,
-        messages:   [{ role: 'user', content: prompt }],
-      }),
-    });
-    const data  = await res.json();
-    const text  = (data.content || []).map(b => b.text || '').join('').trim();
-    const clean = text.replace(/```json|```/g, '').trim();
-    return JSON.parse(clean);
-  } catch (err) {
-    console.warn('[edgar] Sector classification failed:', err.message);
-    return {};
-  }
-}
-
-// ── Resolve sectors for all equity holdings ───────────────────────────────────
-async function resolveHoldingSectors(holdings) {
-  const equityHoldings = holdings.filter(
-    h => h.assetCat === 'EC' && h.weight >= MIN_EQUITY_WEIGHT && h.ticker
-  );
-  if (!equityHoldings.length) return holdings;
-
-  const uncached = [];
-  const sectorMap = {};
-
-  await Promise.all(equityHoldings.map(async (h) => {
-    try {
-      const cached = await getSectorMapping(h.ticker);
-      if (cached) {
-        sectorMap[h.ticker] = { sector: cached.sector, industry: cached.industry };
-      } else {
-        uncached.push(h.ticker);
-      }
-    } catch {
-      uncached.push(h.ticker);
-    }
-  }));
-
-  for (let i = 0; i < uncached.length; i += SECTOR_BATCH_SIZE) {
-    const batch   = uncached.slice(i, i + SECTOR_BATCH_SIZE);
-    const results = await classifySectorsBatch(batch);
-
-    await Promise.all(batch.map(async (ticker) => {
-      const sector = results[ticker] ?? null;
-      sectorMap[ticker] = { sector, industry: null };
-      if (sector) {
-        try {
-          await setSectorMapping(ticker, sector, null);
-        } catch (err) {
-          console.warn(`[edgar] Sector cache write failed for ${ticker}:`, err.message);
-        }
-      }
-    }));
-  }
-
-  return holdings.map(h => {
-    if (sectorMap[h.ticker]) {
-      return { ...h, sector: sectorMap[h.ticker].sector, industry: sectorMap[h.ticker].industry };
-    }
-    return h;
-  });
-}
-
-// ── Public entry point ────────────────────────────────────────────────────────
-export async function fetchHoldings(ticker, fundName) {
-  if (MONEY_MARKET_FUNDS.has(ticker)) return [];
-
-  try {
-    const cached = await getHoldings(ticker);
-    if (cached?.length) return cached;
-  } catch (err) {
-    console.warn(`[edgar] Cache read failed for ${ticker}:`, err.message);
-  }
-
-  const cik = await getCik(ticker);
+  // ── 2. EFTS fallback ─────────────────────────────────────────────────────
   if (!cik) {
-    console.warn(`[edgar] Could not resolve CIK for ${ticker}`);
+    console.log(`[edgar] ${ticker} not in CIK map — trying EFTS`);
+    cik = await resolveCIKviaEFTS(ticker);
+    if (!cik) {
+      console.warn(`[edgar] ${ticker} — CIK not found via map or EFTS, skipping`);
+      return [];
+    }
+  }
+
+  // ── 3. Find most recent NPORT-P accession number ─────────────────────────
+  const accNo = await fetchLatestNportAccNo(cik);
+  if (!accNo) {
+    console.warn(`[edgar] ${ticker} — no NPORT-P filing found for CIK ${cik}`);
     return [];
   }
 
-  const filing = await getLatestNportFiling(cik);
-  if (!filing) {
-    console.warn(`[edgar] No NPORT-P filing found for ${ticker} (CIK ${cik})`);
+  // ── 4. Fetch filing index → primary XML URL ──────────────────────────────
+  const accNoDashes = stripDashes(accNo);
+  const xmlUrl = await fetchPrimaryXmlUrl(cik, accNoDashes);
+  if (!xmlUrl) {
+    console.warn(`[edgar] ${ticker} — could not find XML in filing index`);
     return [];
   }
 
-  const { accession, primaryDoc } = filing;
-
-  if (!primaryDoc) {
-    console.warn(`[edgar] No primaryDocument in submissions for ${ticker} (accession ${accession})`);
-    return [];
-  }
-
-  // ── Fetch NPORT-P XML ────────────────────────────────────────────────────
-  // Archives live on www.sec.gov — use /api/www4sec proxy.
-  // Filer CIK = first numeric segment of accession: "0000035402-26-002126" → 35402
-  let holdings = [];
-  try {
-    const accessionClean = accession.replace(/-/g, '');
-    const filerCik       = String(parseInt(accession.split('-')[0], 10));
-    const xmlUrl         = `/api/www4sec/Archives/edgar/data/${filerCik}/${accessionClean}/${primaryDoc}`;
-
-    console.log(`[edgar] Fetching NPORT-P XML for ${ticker}: ${xmlUrl}`);
-
-    const xmlText = await throttledSecRequest(() =>
-      fetch(xmlUrl).then(r => {
-        if (!r.ok) throw new Error(`HTTP ${r.status}`);
-        return r.text();
-      })
-    );
-
-    holdings = parseHoldingsFromXml(xmlText);
-  } catch (err) {
-    console.warn(`[edgar] NPORT-P fetch failed for ${ticker} (accession ${accession}):`, err.message);
-    return [];
-  }
-
-  if (!holdings.length) {
-    console.warn(`[edgar] No holdings parsed for ${ticker}`);
-    return [];
-  }
-
-  holdings = await resolveHoldingSectors(holdings);
-
-  try {
-    await setHoldings(ticker, holdings);
-  } catch (err) {
-    console.warn(`[edgar] Cache write failed for ${ticker}:`, err.message);
-  }
-
+  // ── 5. Parse NPORT-P XML ─────────────────────────────────────────────────
+  const holdings = await parseNportXml(xmlUrl);
+  console.log(`[edgar] ${ticker} — ${holdings.length} holdings parsed`);
   return holdings;
+}
+
+// ---------------------------------------------------------------------------
+// Public export
+// ---------------------------------------------------------------------------
+
+/**
+ * Fetches holdings for all given fund tickers.
+ *
+ * - Skips money market funds (FDRXX, ADAXX).
+ * - Checks Supabase holdings_cache (15-day TTL) before hitting SEC.
+ * - Applies 300ms delay between live SEC fetches.
+ * - Calls onProgress after every 3rd ticker.
+ *
+ * @param {string[]}  fundTickers - Array of fund ticker strings.
+ * @param {Function}  onProgress  - Optional callback(completedCount, totalCount).
+ * @returns {Promise<Object>}     - { TICKER: [holdingObject, ...] }
+ */
+export async function fetchAllHoldings(fundTickers, onProgress) {
+  const results   = {};
+  let completed   = 0;
+
+  // Load CIK map once (module-level cache after first call)
+  const cikMap = await loadCIKMap();
+
+  for (let i = 0; i < fundTickers.length; i++) {
+    const ticker = fundTickers[i];
+
+    // Skip money market funds
+    if (MONEY_MARKET_TICKERS.has(ticker)) {
+      results[ticker] = [];
+      completed++;
+      if (completed % 3 === 0 && onProgress) onProgress(completed, fundTickers.length);
+      continue;
+    }
+
+    // ── Supabase cache check ──────────────────────────────────────────────
+    let cached = null;
+    try {
+      cached = await getHoldings(ticker);
+    } catch (cacheErr) {
+      console.warn(`[edgar] ${ticker} cache read error:`, cacheErr.message);
+    }
+
+    if (cached && cached.length > 0) {
+      results[ticker] = cached;
+      completed++;
+      if (completed % 3 === 0 && onProgress) onProgress(completed, fundTickers.length);
+      continue;
+    }
+
+    // ── Live SEC fetch ────────────────────────────────────────────────────
+    let holdings = [];
+    try {
+      holdings = await fetchHoldingsForTicker(ticker, cikMap);
+    } catch (err) {
+      console.warn(`[edgar] ${ticker} unexpected error:`, err.message);
+    }
+
+    // Persist to Supabase regardless of whether holdings is empty
+    // (saveHoldings handles empty arrays gracefully — it just clears the rows)
+    if (holdings.length > 0) {
+      try {
+        await saveHoldings(ticker, holdings);
+      } catch (saveErr) {
+        console.warn(`[edgar] ${ticker} cache save error:`, saveErr.message);
+      }
+    }
+
+    results[ticker] = holdings;
+    completed++;
+    if (completed % 3 === 0 && onProgress) onProgress(completed, fundTickers.length);
+
+    // 300ms spacing — SEC rate limit
+    if (i < fundTickers.length - 1) {
+      await sleep(DELAY_MS);
+    }
+  }
+
+  // Final progress tick for any remainder
+  if (onProgress && completed > 0 && completed % 3 !== 0) {
+    onProgress(completed, fundTickers.length);
+  }
+
+  return results;
 }
