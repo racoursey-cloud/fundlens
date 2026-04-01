@@ -1094,6 +1094,7 @@ export default function SetupWizard({ userId, onComplete }) {
     if (step === 1) return data.name.trim().length > 0;
     if (step === 2) return data.funds.length >= 1;
     if (step === 3) return true; // auto-normalize on advance
+    if (step === 4) return true;
     return false;
   };
 
