@@ -6,12 +6,12 @@
 // Export: fetchWorldData(userId, onProgress)
 //   onProgress(detail) — string status update callback, called throughout
 //
-// Return shape:
+// Return shape (matches thesis.js buildPrompt expectations exactly):
 //   {
-//     fredData,       // { SERIES_ID: { label, value, date, prev }, _goldUSD: ... }
-//     headlines,      // string[], RSS first then GDELT, deduplicated, ≤ 36
-//     treasury,       // { t2y, t10y, t30y, updated } | null
-//     goldUSD,        // string like "3150.00" | null
+//     fred,           // { SERIES_ID: { label, value, date, prev } }
+//     treasury,       // { y2, y10, y30, date } | null
+//     gold,           // { price: string, date: string } | null
+//     headlines,      // { title: string }[], deduplicated, ≤ 36
 //     fetchedAt,      // ISO timestamp
 //     dataQuality: {
 //       fredSeriesCount, fredSeriesTotal,
@@ -33,6 +33,12 @@ const MS_PER_DAY = 86_400_000;
 
 function oneYearAgoISO() {
   return new Date(Date.now() - 365 * MS_PER_DAY).toISOString().slice(0, 10);
+}
+
+// Resolves the source type field regardless of whether getEnabledSources
+// returns it as `type` or `source_type` (Supabase column name).
+function sourceType(s) {
+  return s.source_type ?? s.type ?? '';
 }
 
 // ---------------------------------------------------------------------------
@@ -83,11 +89,13 @@ async function fetchTreasuryData() {
     return null;
   };
 
+  // Normalise to the field names thesis.js buildPrompt() expects:
+  // y1, y2, y5, y10, y30, date
   return {
-    t2y:     pick('2 Yr',  't2y',  'y2',  'BC_2YEAR'),
-    t10y:    pick('10 Yr', 't10y', 'y10', 'BC_10YEAR'),
-    t30y:    pick('30 Yr', 't30y', 'y30', 'BC_30YEAR'),
-    updated: data.updated ?? null,
+    y2:   pick('2 Yr',  't2y',  'y2',  'BC_2YEAR'),
+    y10:  pick('10 Yr', 't10y', 'y10', 'BC_10YEAR'),
+    y30:  pick('30 Yr', 't30y', 'y30', 'BC_30YEAR'),
+    date: data.updated ?? new Date().toISOString().slice(0, 10),
   };
 }
 
@@ -113,12 +121,12 @@ async function fetchGoldPrice() {
 // appended as queries 3 and 4.
 // ---------------------------------------------------------------------------
 
-function buildGdeltQueries(fredData, goldUSD) {
+function buildGdeltQueries(fred, goldPrice) {
   // Extract numeric values — keys are whatever series_id the source_registry
   // uses, so we try a handful of known aliases.
   const get = (...ids) => {
     for (const id of ids) {
-      const v = fredData[id]?.value;
+      const v = fred[id]?.value;
       if (v != null && !isNaN(v)) return v;
     }
     return null;
@@ -132,12 +140,11 @@ function buildGdeltQueries(fredData, goldUSD) {
   const bei   = get('T10YIE', 'BREAKEVEN', 'T10YIEM'); // 10Y breakeven inflation
   const oil   = get('DCOILWTICO', 'OIL', 'WTI');      // WTI crude
   const umcsi = get('UMCSENT', 'SENTIMENT', 'UMich'); // Consumer sentiment
-  const gold  = goldUSD ? parseFloat(goldUSD) : null;
+  const gold  = goldPrice ? parseFloat(goldPrice) : null;
   const curve = t10y != null && t2y != null ? t10y - t2y : null;
 
   const signals = [];
 
-  // --- Dynamic signals, ordered by assigned priority ---
   if (hy != null && hy > 5)
     signals.push({ p: 10, q: 'high yield credit spreads bond market stress distress' });
   if (curve != null && curve < -0.2)
@@ -163,11 +170,9 @@ function buildGdeltQueries(fredData, goldUSD) {
   if (hy != null && hy > 3.5 && hy <= 5)
     signals.push({ p: 5,  q: 'credit spread widening corporate bonds risk appetite decline' });
 
-  // Sort by priority desc, take top 2
   signals.sort((a, b) => b.p - a.p);
   const top2 = signals.slice(0, 2).map(s => s.q);
 
-  // Ensure we always have 2 dynamic queries even if no signals fired
   const fallbacks = [
     'equity market volatility stock earnings guidance outlook',
     'federal reserve monetary policy inflation economic outlook',
@@ -176,7 +181,6 @@ function buildGdeltQueries(fredData, goldUSD) {
     top2.push(fallbacks[top2.length]);
   }
 
-  // Static queries always occupy slots 3 and 4
   return [
     ...top2,
     'trade tariffs earnings guidance corporate profits supply chain',
@@ -229,16 +233,18 @@ export async function fetchWorldData(userId, onProgress = () => {}) {
   const sources = await getEnabledSources(userId);
 
   // 2. Partition by type — only enabled rows.
-  const fredSources     = sources.filter(s => s.type === 'fred'     && s.enabled);
-  const treasurySources = sources.filter(s => s.type === 'treasury' && s.enabled);
-  const gdeltSources    = sources.filter(s => s.type === 'gdelt'    && s.enabled);
-  const rssSources      = sources.filter(s => s.type === 'rss'      && s.enabled);
+  //    Accept both `source_type` (Supabase column name) and `type` (alias)
+  //    so this works regardless of how getEnabledSources maps the field.
+  const fredSources     = sources.filter(s => sourceType(s) === 'fred'     && s.enabled);
+  const treasurySources = sources.filter(s => sourceType(s) === 'treasury' && s.enabled);
+  const gdeltSources    = sources.filter(s => sourceType(s) === 'gdelt'    && s.enabled);
+  const rssSources      = sources.filter(s => sourceType(s) === 'rss'      && s.enabled);
 
   // -------------------------------------------------------------------------
   // 3. FRED — sequential, one request at a time.
   //    The Railway FRED proxy rate-limits concurrent requests.
   // -------------------------------------------------------------------------
-  const fredData      = {};
+  const fred          = {};
   let fredSeriesCount = 0;
   const fredSeriesTotal = fredSources.length;
 
@@ -251,7 +257,7 @@ export async function fetchWorldData(userId, onProgress = () => {}) {
       const raw = await fetchFredObservations(seriesId);
       const { value, date, prev } = extractLatestObservation(raw);
       if (value !== null) {
-        fredData[seriesId] = { label, value, date, prev };
+        fred[seriesId] = { label, value, date, prev };
         fredSeriesCount++;
       }
     } catch (err) {
@@ -260,7 +266,7 @@ export async function fetchWorldData(userId, onProgress = () => {}) {
   }
 
   // -------------------------------------------------------------------------
-  // 4. Treasury yields
+  // 4. Treasury yields — normalised to thesis.js field names (y2, y10, y30)
   // -------------------------------------------------------------------------
   let treasury = null;
   if (treasurySources.length > 0) {
@@ -274,15 +280,21 @@ export async function fetchWorldData(userId, onProgress = () => {}) {
 
   // -------------------------------------------------------------------------
   // 5. Gold price — always fetched regardless of source_registry.
-  //    Stored as fredData._goldUSD for GDELT signal detection.
+  //    Returned as gold: { price, date } to match thesis.js buildPrompt().
   // -------------------------------------------------------------------------
   onProgress('Fetching gold price…');
-  const goldUSD = await fetchGoldPrice();
-  if (goldUSD) {
-    fredData._goldUSD = {
+  const goldRaw  = await fetchGoldPrice();
+  const todayISO = new Date().toISOString().slice(0, 10);
+  const gold     = goldRaw
+    ? { price: goldRaw, date: todayISO }
+    : null;
+
+  // Also store in fred map so buildGdeltQueries can read it for signal detection.
+  if (goldRaw) {
+    fred._goldUSD = {
       label: 'Gold (XAU/USD)',
-      value: parseFloat(goldUSD),
-      date:  new Date().toISOString().slice(0, 10),
+      value: parseFloat(goldRaw),
+      date:  todayISO,
       prev:  null,
     };
   }
@@ -291,9 +303,9 @@ export async function fetchWorldData(userId, onProgress = () => {}) {
   // 6. GDELT — 4 adaptive queries built from FRED signals.
   //    Fetched sequentially to respect proxy rate limits.
   // -------------------------------------------------------------------------
-  const gdeltHeadlines = [];
+  const gdeltRawTitles = [];
   if (gdeltSources.length > 0) {
-    const queries = buildGdeltQueries(fredData, goldUSD);
+    const queries = buildGdeltQueries(fred, goldRaw);
     for (let i = 0; i < queries.length; i++) {
       try {
         onProgress(`Fetching news signal ${i + 1} of ${queries.length}…`);
@@ -307,7 +319,7 @@ export async function fetchWorldData(userId, onProgress = () => {}) {
         const articles = result?.articles ?? result?.data ?? [];
         for (const article of articles) {
           const title = article.title ?? article.url ?? null;
-          if (title) gdeltHeadlines.push(title);
+          if (title) gdeltRawTitles.push(title);
         }
       } catch (err) {
         console.warn(`[world.js] GDELT query ${i + 1} failed:`, err.message);
@@ -319,7 +331,7 @@ export async function fetchWorldData(userId, onProgress = () => {}) {
   // 7. RSS feeds — parallel (each feed is independent).
   //    Uses Promise.allSettled so one failed feed doesn't abort the rest.
   // -------------------------------------------------------------------------
-  const rssHeadlines = [];
+  const rssRawTitles = [];
   if (rssSources.length > 0) {
     onProgress('Fetching RSS news feeds…');
     const results = await Promise.allSettled(
@@ -332,22 +344,25 @@ export async function fetchWorldData(userId, onProgress = () => {}) {
       })
     );
     for (const r of results) {
-      if (r.status === 'fulfilled') rssHeadlines.push(...r.value);
+      if (r.status === 'fulfilled') rssRawTitles.push(...r.value);
     }
   }
 
   // -------------------------------------------------------------------------
   // 8. Merge headlines: RSS first (more current), then GDELT.
   //    Deduplicate on first 60 chars. Hard cap at 36.
+  //    Wrap as { title } objects — this is what thesis.js buildPrompt expects.
   // -------------------------------------------------------------------------
-  const headlines = deduplicateHeadlines([...rssHeadlines, ...gdeltHeadlines]).slice(0, 36);
+  const rawStrings   = deduplicateHeadlines([...rssRawTitles, ...gdeltRawTitles]).slice(0, 36);
+  const headlines    = rawStrings.map(title => ({ title }));
 
   // -------------------------------------------------------------------------
   // 9. Persist to Supabase cache (row id=1, overwritten each run).
+  //    Pass the original fred map and plain-string headlines to saveWorldData.
   // -------------------------------------------------------------------------
   try {
     onProgress('Saving world data to cache…');
-    await saveWorldData(fredData, headlines, treasury);
+    await saveWorldData(fred, rawStrings, treasury);
   } catch (err) {
     console.warn('[world.js] saveWorldData failed:', err.message);
   }
@@ -355,21 +370,22 @@ export async function fetchWorldData(userId, onProgress = () => {}) {
   onProgress('World data ready.');
 
   // -------------------------------------------------------------------------
-  // 10. Return
+  // 10. Return — field names match thesis.js buildPrompt() exactly:
+  //     fred, treasury (y2/y10/y30/date), gold ({ price, date }), headlines ({ title })
   // -------------------------------------------------------------------------
   return {
-    fredData,
-    headlines,
+    fred,
     treasury,
-    goldUSD,
+    gold,
+    headlines,
     fetchedAt: new Date().toISOString(),
     dataQuality: {
       fredSeriesCount,
       fredSeriesTotal,
       headlineCount:      headlines.length,
-      gdeltHeadlineCount: gdeltHeadlines.length,
+      gdeltHeadlineCount: gdeltRawTitles.length,
       fredOk:             fredSeriesCount >= 5,
-      gdeltOk:            gdeltHeadlines.length > 0,
+      gdeltOk:            gdeltRawTitles.length > 0,
     },
   };
 }
