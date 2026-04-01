@@ -278,6 +278,131 @@ async function fetchPrimaryXmlUrl(cik, accNoDashes) {
   }
 }
 
+
+// ---------------------------------------------------------------------------
+// Static sector map — top ~150 mutual fund equity holdings by GICS sector.
+// Used to enrich NPORT-P holdings whose XML carries no sector label.
+// Covers the majority of positions in large-cap US equity funds.
+// ---------------------------------------------------------------------------
+const SECTOR_MAP = {
+  // Technology
+  AAPL:'Technology', MSFT:'Technology', NVDA:'Technology', AVGO:'Technology',
+  ORCL:'Technology', CRM:'Technology', ADBE:'Technology', AMD:'Technology',
+  QCOM:'Technology', TXN:'Technology', INTC:'Technology', MU:'Technology',
+  AMAT:'Technology', KLAC:'Technology', LRCX:'Technology', ADI:'Technology',
+  MCHP:'Technology', CDNS:'Technology', SNPS:'Technology', FTNT:'Technology',
+  PANW:'Technology', CSCO:'Technology', IBM:'Technology', HPQ:'Technology',
+  DELL:'Technology', STX:'Technology', WDC:'Technology', NTAP:'Technology',
+  // Communication Services
+  META:'Communication Services', GOOGL:'Communication Services',
+  GOOG:'Communication Services', NFLX:'Communication Services',
+  TMUS:'Communication Services', VZ:'Communication Services',
+  T:'Communication Services', DIS:'Communication Services',
+  CMCSA:'Communication Services', CHTR:'Communication Services',
+  EA:'Communication Services', TTWO:'Communication Services',
+  WBD:'Communication Services', FOXA:'Communication Services',
+  // Consumer Discretionary
+  AMZN:'Consumer Discretionary', TSLA:'Consumer Discretionary',
+  HD:'Consumer Discretionary', MCD:'Consumer Discretionary',
+  NKE:'Consumer Discretionary', SBUX:'Consumer Discretionary',
+  LOW:'Consumer Discretionary', TJX:'Consumer Discretionary',
+  BKNG:'Consumer Discretionary', CMG:'Consumer Discretionary',
+  ABNB:'Consumer Discretionary', DHI:'Consumer Discretionary',
+  LEN:'Consumer Discretionary', PHM:'Consumer Discretionary',
+  GM:'Consumer Discretionary', F:'Consumer Discretionary',
+  ROST:'Consumer Discretionary', ORLY:'Consumer Discretionary',
+  AZO:'Consumer Discretionary', BBY:'Consumer Discretionary',
+  // Consumer Staples
+  WMT:'Consumer Staples', PG:'Consumer Staples', KO:'Consumer Staples',
+  PEP:'Consumer Staples', COST:'Consumer Staples', PM:'Consumer Staples',
+  MO:'Consumer Staples', MDLZ:'Consumer Staples', CL:'Consumer Staples',
+  KHC:'Consumer Staples', GIS:'Consumer Staples', K:'Consumer Staples',
+  SYY:'Consumer Staples', KR:'Consumer Staples', HSY:'Consumer Staples',
+  CHD:'Consumer Staples', CLX:'Consumer Staples',
+  // Energy
+  XOM:'Energy', CVX:'Energy', COP:'Energy', EOG:'Energy', SLB:'Energy',
+  MPC:'Energy', PSX:'Energy', VLO:'Energy', PXD:'Energy', OXY:'Energy',
+  HAL:'Energy', DVN:'Energy', HES:'Energy', FANG:'Energy', BKR:'Energy',
+  APA:'Energy', MRO:'Energy', CTRA:'Energy', PR:'Energy',
+  // Financials
+  BRK:'Financials', JPM:'Financials', BAC:'Financials', WFC:'Financials',
+  GS:'Financials', MS:'Financials', C:'Financials', AXP:'Financials',
+  BLK:'Financials', SCHW:'Financials', CB:'Financials', MMC:'Financials',
+  AON:'Financials', TRV:'Financials', AFL:'Financials', MET:'Financials',
+  PRU:'Financials', AIG:'Financials', PGR:'Financials', ALL:'Financials',
+  USB:'Financials', PNC:'Financials', TFC:'Financials', COF:'Financials',
+  DFS:'Financials', SYF:'Financials', FITB:'Financials', KEY:'Financials',
+  CFG:'Financials', HBAN:'Financials', RF:'Financials', WRB:'Financials',
+  ICE:'Financials', CME:'Financials', NDAQ:'Financials', SPGI:'Financials',
+  MCO:'Financials', MSCI:'Financials', V:'Financials', MA:'Financials',
+  PYPL:'Financials', FIS:'Financials', FI:'Financials',
+  // Healthcare
+  LLY:'Healthcare', UNH:'Healthcare', JNJ:'Healthcare', ABBV:'Healthcare',
+  MRK:'Healthcare', ABT:'Healthcare', TMO:'Healthcare', DHR:'Healthcare',
+  AMGN:'Healthcare', BMY:'Healthcare', GILD:'Healthcare', VRTX:'Healthcare',
+  REGN:'Healthcare', ISRG:'Healthcare', SYK:'Healthcare', BSX:'Healthcare',
+  MDT:'Healthcare', ZBH:'Healthcare', EW:'Healthcare', BAX:'Healthcare',
+  CVS:'Healthcare', CI:'Healthcare', HUM:'Healthcare', CNC:'Healthcare',
+  ELV:'Healthcare', MOH:'Healthcare', HCA:'Healthcare', THC:'Healthcare',
+  IQV:'Healthcare', A:'Healthcare', DXCM:'Healthcare', IDXX:'Healthcare',
+  // Industrials
+  GE:'Industrials', RTX:'Industrials', HON:'Industrials', CAT:'Industrials',
+  DE:'Industrials', LMT:'Industrials', NOC:'Industrials', GD:'Industrials',
+  BA:'Industrials', UPS:'Industrials', FDX:'Industrials', ETN:'Industrials',
+  EMR:'Industrials', ITW:'Industrials', PH:'Industrials', ROK:'Industrials',
+  MMM:'Industrials', ROP:'Industrials', CTAS:'Industrials', FAST:'Industrials',
+  NSC:'Industrials', UNP:'Industrials', CSX:'Industrials', WAB:'Industrials',
+  CARR:'Industrials', OTIS:'Industrials', IR:'Industrials',
+  // Materials
+  LIN:'Materials', APD:'Materials', SHW:'Materials', ECL:'Materials',
+  NEM:'Materials', FCX:'Materials', NUE:'Materials', STLD:'Materials',
+  PPG:'Materials', IFF:'Materials', ALB:'Materials', CF:'Materials',
+  MOS:'Materials', DOW:'Materials', DD:'Materials', LYB:'Materials',
+  // Real Estate
+  PLD:'Real Estate', AMT:'Real Estate', EQIX:'Real Estate', CCI:'Real Estate',
+  PSA:'Real Estate', DLR:'Real Estate', O:'Real Estate', WELL:'Real Estate',
+  VTR:'Real Estate', AVB:'Real Estate', EQR:'Real Estate', SPG:'Real Estate',
+  // Utilities
+  NEE:'Utilities', DUK:'Utilities', SO:'Utilities', D:'Utilities',
+  AEP:'Utilities', SRE:'Utilities', EXC:'Utilities', XEL:'Utilities',
+  PCG:'Utilities', ED:'Utilities', ES:'Utilities', ETR:'Utilities',
+  WEC:'Utilities', AWK:'Utilities', CMS:'Utilities', ATO:'Utilities',
+  LNT:'Utilities', CNP:'Utilities', NI:'Utilities', PNW:'Utilities',
+};
+
+/**
+ * Enriches holding objects with GICS sector labels.
+ * Looks up each holding's ticker in SECTOR_MAP.
+ * Falls back to asset_type label for non-equity holdings.
+ */
+function enrichHoldingsWithSectors(holdings) {
+  const ASSET_SECTORS = {
+    EC:  'Consumer Discretionary',  // equity common — use sector map
+    EP:  'Financials',              // equity preferred
+    DBT: null,                      // debt — skip sector
+    RF:  null,                      // registered fund — skip
+    ABS: null,                      // asset-backed — skip
+    MBS: null,                      // mortgage-backed — skip
+  };
+
+  return holdings.map(h => {
+    // Try ticker lookup first (works for most equity holdings)
+    if (h.holding_ticker) {
+      const ticker = h.holding_ticker.toUpperCase().replace(/[^A-Z]/, '');
+      const sector = SECTOR_MAP[ticker];
+      if (sector) return { ...h, sector };
+    }
+
+    // Fall back to asset category — only meaningful for debt/preferred
+    const assetSector = ASSET_SECTORS[h.asset_type];
+    if (assetSector !== undefined && assetSector !== null) {
+      return { ...h, sector: assetSector };
+    }
+
+    return h;  // sector stays null — filtered out downstream
+  });
+}
+
 // ---------------------------------------------------------------------------
 // NPORT-P XML parser
 // ---------------------------------------------------------------------------
@@ -344,9 +469,10 @@ async function parseNportXml(xmlUrl) {
       });
     }
 
-    // Sort by weight descending, take top 200
-    holdings.sort((a, b) => (b.weight ?? 0) - (a.weight ?? 0));
-    return holdings.slice(0, 200);
+    // Enrich with GICS sectors then sort by weight descending, take top 200
+    const enriched = enrichHoldingsWithSectors(holdings);
+    enriched.sort((a, b) => (b.weight ?? 0) - (a.weight ?? 0));
+    return enriched.slice(0, 200);
   } catch (err) {
     console.warn('[edgar] XML fetch/parse error:', err.message);
     return [];
