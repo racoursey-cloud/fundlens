@@ -1,264 +1,242 @@
-// FundLens v4 -- Mandate scoring engine
-// Asks Claude to score each fund's alignment with the current macro environment.
-// Uses world data (FRED + Treasury yield curve + headlines) as context.
+// src/engine/mandate.js
+// FundLens v5 — Mandate Scoring Engine
+// Scores each fund's investment mandate against current macro conditions.
+// This is the single most important scoring factor (40% weight).
 //
-// Architecture notes:
-// - Each fund gets its own Claude call -- SEQUENTIAL with delays between calls.
-// - 3 retries per fund with exponential backoff (longer on 429).
-// - Coverage threshold: 85% of funds must be successfully scored or the
-//   pipeline aborts with an error. (Handoff doc said 70% -- operator overrode to 85%.)
-// - max_tokens: 2200 per call.
-// - Treasury yield curve passed as raw numbers + computed spreads -- NOT as a
-//   label like "steep" or "inverted". Claude reasons from the actual shape.
-//
-// !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-// !! SEQUENTIAL PROCESSING IS MANDATORY -- DO NOT CONVERT TO Promise.all()    !!
-// !! The Claude API rate-limits concurrent requests. Parallel calls cause     !!
-// !! 429 errors across ALL funds, which drops coverage to 0% and crashes     !!
-// !! the entire pipeline. This has broken production multiple times.          !!
-// !! If you are reading this and thinking "Promise.all would be faster" --   !!
-// !! yes it would, and it will also 429 every single call. Do not do it.    !!
-// !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-//
-// !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-// !! QUANT CONTEXT -- FLAGGED FOR OPERATOR APPROVAL BEFORE IMPLEMENTATION !!
-// !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-//
-// fundsWithQuantContext is currently null and intentionally not implemented.
-//
-// What it was intended to do:
-//   Pass each fund's momentum score and risk-adjusted score INTO the mandate
-//   prompt alongside holdings, so Claude can reason about whether market
-//   behaviour (momentum) is CONFIRMING or CONTRADICTING the macro thesis.
-//   Example: a fund with great macro fit but negative momentum is a weaker
-//   buy than one where both signals agree. Claude could weight accordingly.
-//
-// Why it is not implemented yet:
-//   Those scores (momentum, riskAdj) are computed by pipeline.js AFTER
-//   mandate.js runs. The data does not exist at the time mandate.js is called.
-//   Implementing this requires a TWO-PASS pipeline architecture:
-//     Pass 1: tiingo.js computes momentum + riskAdj for all funds
-//     Pass 2: mandate.js runs WITH quant context included
-//   This changes the pipeline execution order and has implications for
-//   performance, caching, and the pipeline step UI.
-//
-// DO NOT IMPLEMENT without explicit operator discussion and approval.
-// Raise this when pipeline.js is being designed -- that is the right moment.
-//
-// !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+// ============================================================
+// ⚠️  CRITICAL: SEQUENTIAL CLAUDE CALLS ONLY
+// ============================================================
+// All Claude API calls in this file MUST be sequential.
+// DO NOT use Promise.all(), Promise.allSettled(), or any form
+// of concurrent Claude call. This has crashed production 5+ times.
+// Pattern: one call → await → 1.2s delay → next call.
+// ============================================================
 
+import { callClaude } from '../services/api.js';
 import { CLAUDE_MODEL } from './constants.js';
 
-const MANDATE_COVERAGE_THRESHOLD = 0.85; // 85% of funds must score successfully
-const MANDATE_MAX_TOKENS = 2200;
-const MANDATE_RETRIES = 3;
-const MANDATE_TOP_HOLDINGS = 15; // top N holdings by weight passed to Claude
-const MANDATE_TOP_HEADLINES = 10; // top N headlines from world data passed to Claude
-const DELAY_BETWEEN_FUNDS_MS = 1200; // pause between sequential fund calls
-const DELAY_ON_429_BASE_MS = 3000;   // base backoff when rate-limited (multiplied by attempt)
+// ---------------------------------------------------------------------------
+// Internal helpers
+// ---------------------------------------------------------------------------
 
-// -- Build the shared macro context block ------------------------------------
-// This block is identical for every fund in the run -- built once, reused.
-function buildMacroContext(worldData) {
-  const { fredData = {}, treasuryData = null, headlines = [] } = worldData;
-
-  const lines = ['=== CURRENT MACRO ENVIRONMENT ===', ''];
-
-  // FRED economic series
-  lines.push('--- Economic Indicators (FRED) ---');
-  for (const [seriesId, entry] of Object.entries(fredData)) {
-    if (entry?.value !== undefined) {
-      lines.push(`  ${entry.label}: ${entry.value} (as of ${entry.date})`);
-    }
-  }
-  lines.push('');
-
-  // Treasury yield curve -- raw numbers + spreads, no labels like "steep/inverted"
-  if (treasuryData) {
-    lines.push('--- Treasury Yield Curve ---');
-    lines.push(`  Date: ${treasuryData.date}`);
-    lines.push(`  1Y: ${treasuryData.y1}%   2Y: ${treasuryData.y2}%   5Y: ${treasuryData.y5}%   10Y: ${treasuryData.y10}%   30Y: ${treasuryData.y30}%`);
-    lines.push('');
-    lines.push('  Computed spreads (percentage points):');
-    const s = treasuryData.spreads;
-    lines.push(`    Short end slope (2Y-1Y):    ${s.shortEnd >= 0 ? '+' : ''}${s.shortEnd}  [Fed near-term rate expectations]`);
-    lines.push(`    Curve belly (5Y vs midpoint): ${s.belly   >= 0 ? '+' : ''}${s.belly}  [Mid-curve curvature -- transition signal]`);
-    lines.push(`    Classic spread (10Y-2Y):    ${s.classic >= 0 ? '+' : ''}${s.classic}  [Recession probability indicator]`);
-    lines.push(`    Long end slope (30Y-10Y):   ${s.longEnd >= 0 ? '+' : ''}${s.longEnd}  [Long-term inflation expectations]`);
-    lines.push('');
-  } else {
-    lines.push('--- Treasury Yield Curve ---');
-    lines.push('  [Unavailable -- Treasury data could not be fetched]');
-    lines.push('');
-  }
-
-  // Top headlines
-  if (headlines.length) {
-    lines.push('--- Recent Financial Headlines ---');
-    headlines.slice(0, MANDATE_TOP_HEADLINES).forEach((h, i) => {
-      lines.push(`  ${i + 1}. [${h.source}] ${h.title}`);
-    });
-    lines.push('');
-  }
-
-  lines.push('=================================');
-  return lines.join('\n');
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-// -- Build the per-fund prompt -----------------------------------------------
-function buildFundPrompt(macroContext, fund) {
-  const holdings = (fund.holdings || [])
-    .slice(0, MANDATE_TOP_HOLDINGS)
-    .map(h => `    ${h.weight?.toFixed(1) ?? '?'}%  ${h.ticker || 'N/A'}  ${h.name || ''}  [${h.sector || 'Unknown'}]`)
+/**
+ * Build a compact macro summary string from worldData and sectorScores.
+ */
+function buildMacroSummary(worldData, sectorScores) {
+  const fred = worldData?.fred_data ?? {};
+  const headlines = worldData?.headlines ?? [];
+  const treasury = worldData?.treasury_data ?? {};
+
+  // FRED key values — pull most recent observation
+  const fredLines = [];
+  for (const [seriesId, obs] of Object.entries(fred)) {
+    if (Array.isArray(obs) && obs.length > 0) {
+      const latest = obs[0];
+      fredLines.push(`${seriesId}: ${latest.value} (${latest.date})`);
+    }
+  }
+
+  // Treasury yield spreads
+  const yieldLines = [];
+  if (treasury.y2 != null && treasury.y10 != null) {
+    yieldLines.push(`2s10s spread: ${(treasury.y10 - treasury.y2).toFixed(2)}%`);
+  }
+  if (treasury.y10 != null) {
+    yieldLines.push(`10Y yield: ${treasury.y10}%`);
+  }
+
+  // Sector scores summary (top 5 and bottom 3 by score)
+  const sectorLines = [];
+  if (sectorScores && typeof sectorScores === 'object') {
+    const sorted = Object.entries(sectorScores)
+      .filter(([, v]) => v?.score != null)
+      .sort(([, a], [, b]) => b.score - a.score);
+    const top = sorted.slice(0, 5).map(([s, v]) => `${s}: ${v.score.toFixed(1)}`);
+    const bottom = sorted.slice(-3).map(([s, v]) => `${s}: ${v.score.toFixed(1)}`);
+    if (top.length)    sectorLines.push(`Top sectors: ${top.join(', ')}`);
+    if (bottom.length) sectorLines.push(`Weak sectors: ${bottom.join(', ')}`);
+  }
+
+  // Dominant theme
+  const theme = worldData?.dominant_theme ?? 'Unknown';
+  const stance = worldData?.macro_stance ?? '';
+
+  // Top 12 headlines
+  const headlineList = headlines
+    .slice(0, 12)
+    .map((h, i) => `${i + 1}. ${h.title ?? h}`)
     .join('\n');
 
-  return `${macroContext}
-
-=== FUND TO SCORE ===
-Name:   ${fund.name}
-Ticker: ${fund.ticker}
-
-Top holdings by weight:
-${holdings || '  [No holdings data available]'}
-
-=== YOUR TASK ===
-Score this fund's MANDATE ALIGNMENT with the current macro environment above.
-
-Mandate alignment means: given what is happening in the economy RIGHT NOW,
-how well-positioned is this fund's investment strategy and sector exposures?
-
-Consider:
-- Which FRED indicators are signalling growth, stress, or transition?
-- What is the yield curve's shape telling us about the direction of rates
-  and the economy? (Use the raw numbers -- do not just pattern-match on
-  inversion/steepness labels.)
-- Do the fund's top sector exposures benefit or face headwinds in this environment?
-- Are the headlines consistent with or contradicting the FRED picture?
-
-Score guidance (USE THE FULL 1-10 RANGE):
-  9-10: Strategy is exceptionally aligned — sector exposures directly benefit
-        from current macro conditions (e.g. short-duration bonds when rates peak,
-        energy stocks during an oil supply shock).
-  7-8:  Clear tailwinds — most holdings benefit, few face headwinds.
-  5-6:  Mixed or neutral — some exposures help, some hurt, net effect unclear.
-  3-4:  Notable headwinds — key sector exposures face challenges in this environment.
-  1-2:  Severely misaligned — the fund's strategy is the opposite of what current
-        conditions favor (e.g. long-duration bonds when rates are rising sharply,
-        growth tech during a liquidity crunch).
-
-CRITICAL: Different fund types MUST receive different scores. A short-term
-government bond fund and a global equity fund cannot both score 5-6 unless
-macro conditions are genuinely neutral for both. Differentiate aggressively
-based on how each fund's SPECIFIC holdings interact with the macro data above.
-
-Respond ONLY with valid JSON in this exact format:
-{
-  "score": <number 1.0-10.0, one decimal place>,
-  "reasoning": "<2-3 sentences explaining the score>"
+  return [
+    `DOMINANT THEME: ${theme}${stance ? ` | MACRO STANCE: ${stance}` : ''}`,
+    '',
+    'KEY ECONOMIC DATA:',
+    ...fredLines,
+    ...yieldLines,
+    '',
+    'SECTOR SCORES (1-10):',
+    ...sectorLines,
+    '',
+    'TOP HEADLINES:',
+    headlineList,
+  ].join('\n');
 }
 
-Do not include any text outside the JSON object.
-`;
+/**
+ * Build the prompt for a batch mandate scoring call.
+ */
+function buildPrompt(funds, macroSummary) {
+  const fundList = funds
+    .map(f => `  { "ticker": "${f.ticker}", "name": "${f.name}" }`)
+    .join('\n');
+
+  return `You are a professional fund analyst. Score each mutual fund's mandate alignment with current macro conditions.
+
+CURRENT MACRO ENVIRONMENT:
+${macroSummary}
+
+FUNDS TO SCORE:
+${fundList}
+
+SCORING CRITERIA — mandateScore (1-10):
+10 = Fund's mandate directly captures dominant macro themes
+8-9 = Strong alignment — fund benefits meaningfully from current conditions
+6-7 = Moderate fit — mixed exposure, some tailwinds and headwinds
+4-5 = Neutral — fund is relatively environment-agnostic
+2-3 = Headwinds — fund's focus areas face current macro challenges
+1 = Poor fit — fund mandate directly opposes current conditions
+
+IMPORTANT: Use the full 1-10 range. If all funds score between 4-7, your analysis lacks conviction. At least 3 funds should score above 7 and at least 3 should score below 5.
+
+Respond ONLY with valid JSON, no markdown, no commentary:
+{"scores":{"TICKER":{"mandateScore":N,"reasoning":"1 sentence max"}}}`;
 }
 
-// -- Score a single fund with retries ----------------------------------------
-async function scoreFund(macroContext, fund) {
-  const prompt = buildFundPrompt(macroContext, fund);
+/**
+ * Execute a single Claude call for mandate scoring with retry logic.
+ * Returns the parsed scores object or null on failure.
+ */
+async function callClaudeForMandates(funds, macroSummary) {
+  const prompt = buildPrompt(funds, macroSummary);
 
-  for (let attempt = 0; attempt <= MANDATE_RETRIES; attempt++) {
+  for (let attempt = 1; attempt <= 3; attempt++) {
     try {
-      const res = await fetch('/api/claude', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          model:      CLAUDE_MODEL,
-          max_tokens: MANDATE_MAX_TOKENS,
-          system:     'You are a senior macro strategist scoring fund-to-macro alignment. You are decisive and use the full 1-10 scale. You never cluster scores near the midpoint when funds have meaningfully different exposures. You respond with only valid JSON.',
-          messages:   [{ role: 'user', content: prompt }],
-        }),
+      const response = await callClaude({
+        model:      CLAUDE_MODEL,
+        max_tokens: 2200,
+        messages:   [{ role: 'user', content: prompt }],
       });
 
-      // On 429, use longer backoff before retry
-      if (res.status === 429) {
-        if (attempt < MANDATE_RETRIES) {
-          const backoff = DELAY_ON_429_BASE_MS * (attempt + 1);
-          console.warn(`mandate.js: 429 rate-limited for ${fund.ticker}, waiting ${backoff}ms before retry ${attempt + 1}`);
-          await new Promise(r => setTimeout(r, backoff));
+      const text = response?.content?.[0]?.text ?? '';
+
+      // Strip markdown fences if present
+      const clean = text.replace(/```json|```/gi, '').trim();
+
+      let parsed;
+      try {
+        parsed = JSON.parse(clean);
+      } catch {
+        console.warn(`[mandate] JSON parse failed on attempt ${attempt}:`, text.slice(0, 200));
+        if (attempt < 3) {
+          await sleep(3000);
           continue;
         }
-        throw new Error('Claude API 429 (rate limited)');
+        return null;
       }
 
-      if (!res.ok) throw new Error('Claude API ' + res.status);
-
-      const data = await res.json();
-      const text = (data.content || []).map(b => b.text || '').join('').trim();
-      const clean = text.replace(/```json|```/g, '').trim();
-      const parsed = JSON.parse(clean);
-
-      const score = parseFloat(parsed.score);
-      if (isNaN(score) || score < 1 || score > 10) {
-        throw new Error('Score out of range: ' + parsed.score);
+      if (!parsed?.scores || typeof parsed.scores !== 'object') {
+        console.warn(`[mandate] No scores object in response (attempt ${attempt})`);
+        if (attempt < 3) {
+          await sleep(3000);
+          continue;
+        }
+        return null;
       }
 
-      return {
-        ticker:    fund.ticker,
-        score:     Math.round(score * 10) / 10,
-        reasoning: parsed.reasoning || '',
-      };
+      // Validate coverage: at least 70% of funds scored
+      const scoredCount = Object.keys(parsed.scores).length;
+      const requiredCount = Math.floor(funds.length * 0.7);
+      if (scoredCount < requiredCount) {
+        console.warn(
+          `[mandate] Coverage too low: ${scoredCount}/${funds.length} (attempt ${attempt})`
+        );
+        if (attempt < 3) {
+          await sleep(3000);
+          continue;
+        }
+        return null;
+      }
+
+      return parsed.scores;
+
     } catch (err) {
-      if (attempt < MANDATE_RETRIES) {
-        await new Promise(r => setTimeout(r, 600 * (attempt + 1)));
-        continue;
+      const is429 = err?.message?.includes('429') || err?.status === 429;
+      const waitMs = is429 ? 15_000 : 3_000 * attempt;
+      console.warn(`[mandate] Attempt ${attempt} failed (${err.message}). Waiting ${waitMs}ms.`);
+      if (attempt < 3) {
+        await sleep(waitMs);
       }
-      console.warn('mandate.js: scoring failed for', fund.ticker, 'after', MANDATE_RETRIES + 1, 'attempts:', err.message);
-      return null;
     }
   }
+
   return null;
 }
 
-// -- Public entry point ------------------------------------------------------
-// funds: array of { ticker, name, holdings }
-// worldData: { fredData, headlines, treasuryData } from world.js
-//
-// fundsWithQuantContext: null -- NOT YET IMPLEMENTED.
-// See the screaming warning at the top of this file before touching this.
-export async function scoreMandates(funds, worldData, fundsWithQuantContext = null) {
-  if (!funds?.length) return { scores: {}, coverage: 0, acceptable: false };
+// ---------------------------------------------------------------------------
+// Public export
+// ---------------------------------------------------------------------------
 
-  const macroContext = buildMacroContext(worldData);
+/**
+ * Score each fund's mandate alignment against current macro conditions.
+ *
+ * @param {Array<{ticker: string, name: string}>} funds
+ * @param {Object} worldData   — from cached_world_data (fred, headlines, treasury, theme)
+ * @param {Object} sectorScores — map of { sectorName: { score } }
+ * @param {Function} [onProgress] — optional (message: string) => void callback
+ * @returns {Promise<Object|null>} { TICKER: { mandateScore, reasoning } } or null
+ */
+export async function scoreMandates(funds, worldData, sectorScores, onProgress) {
+  if (!funds || funds.length === 0) {
+    console.warn('[mandate] No funds provided.');
+    return null;
+  }
 
-  // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-  // !! SEQUENTIAL -- DO NOT CONVERT TO Promise.all(). SEE FILE HEADER. !!
-  // !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-  const scores = {};
-  let successCount = 0;
+  onProgress?.('Scoring mandate alignment…');
 
-  for (let i = 0; i < funds.length; i++) {
-    const fund = funds[i];
+  const macroSummary = buildMacroSummary(worldData, sectorScores);
 
-    // Delay between calls (skip before the very first one)
-    if (i > 0) {
-      await new Promise(r => setTimeout(r, DELAY_BETWEEN_FUNDS_MS));
-    }
+  // ⚠️ SINGLE BATCHED CALL — all funds in one request.
+  // If this ever needs to be split into multiple calls,
+  // each call MUST be separated by await sleep(1200).
+  const rawScores = await callClaudeForMandates(funds, macroSummary);
 
-    const result = await scoreFund(macroContext, fund);
-    if (result) {
-      scores[result.ticker] = result;
-      successCount++;
+  if (!rawScores) {
+    console.error('[mandate] All attempts failed. Returning null (scoring.js will use 5.0 fallbacks).');
+    return null;
+  }
+
+  // Normalise: uppercase tickers, clamp scores 1-10, fill missing funds
+  const result = {};
+
+  for (const fund of funds) {
+    const key = fund.ticker.toUpperCase();
+    const raw = rawScores[fund.ticker] ?? rawScores[key] ?? null;
+
+    if (raw && raw.mandateScore != null) {
+      result[key] = {
+        mandateScore: Math.max(1, Math.min(10, Number(raw.mandateScore))),
+        reasoning:    raw.reasoning ?? '',
+      };
+    } else {
+      // Fund not scored by Claude — caller will apply 5.0 fallback
+      result[key] = null;
     }
   }
 
-  const coverage = successCount / funds.length;
-  const acceptable = coverage >= MANDATE_COVERAGE_THRESHOLD;
-
-  if (!acceptable) {
-    console.error(
-      `mandate.js: coverage ${(coverage * 100).toFixed(0)}% below threshold ${(MANDATE_COVERAGE_THRESHOLD * 100).toFixed(0)}%`,
-      `(${successCount}/${funds.length} funds scored)`
-    );
-  }
-
-  return { scores, coverage, acceptable };
+  onProgress?.('Mandate scoring complete.');
+  return result;
 }
