@@ -7,7 +7,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import useAppStore from '../../store/useAppStore';
 import { getEnabledSources } from '../../services/cache';
-import supabase from '../../services/supabase';
+import { supabase } from '../../services/supabase';
 
 // ---------------------------------------------------------------------------
 // Sub-component: Toggle Switch
