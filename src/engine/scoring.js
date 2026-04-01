@@ -1,196 +1,194 @@
-// FundLens v4 — Composite score engine
-// Combines all engine outputs into a single composite score (1.0–10.0) per fund.
+// =============================================================================
+// FundLens v5 — src/engine/scoring.js
+// Composite score calculator.
+//
+// Inputs: fund list + all sub-score maps from pipeline steps 3–7
+// Output: array of fund objects with composite scores, sorted desc.
 //
 // Formula:
-//   raw = (mandateScore * W_mandate)
-//       + (momentum1to10 * W_momentum)
-//       + (sharpe1to10   * W_riskAdj)
-//       + (managerScore  * W_managerQuality)
+//   raw = (mandateScore × W1) + (momentum × W2) + (riskAdj × W3) + (manager × W4)
+//   composite = clamp(raw − concentrationPenalty + expenseModifier, 1.0, 10.0)
 //
-//   penalised = raw - concentrationPenalty
-//   modified  = penalised + expenseModifier   ← ±0.5, applied after weighted sum
-//   composite = clamp(modified, 1.0, 10.0)
-//
-// Weights come from the user's saved preferences (useAppStore → DEFAULT_WEIGHTS
-// as fallback). They are integers summing to 100; divide by 100 for multiplication.
-//
-// Architecture notes:
-// - All sub-scores are normalised to 1–10 before weighting.
-// - Null sub-scores fall back to 5.0 (neutral) with a data-quality flag.
-// - concentrationPenalty: 0–2 points deducted when top-3 holdings > 30% of NAV.
-// - expenseModifier: ±0.5 from expenses.js, applied last before clamping.
-// - Money market funds receive a fixed composite of 5.0 (neutral sentinel).
-// - Returns a dataQuality object so the UI can display coverage warnings.
+// Null sub-scores → 5.0 fallback + dataQuality flag
+// Money market (FDRXX, ADAXX) → fixed 5.0, all calculation skipped
+// =============================================================================
 
-import { DEFAULT_WEIGHTS, MONEY_MARKET_FUNDS } from './constants.js';
+import { MONEY_MARKET_TICKERS } from './constants.js';
 
-// ── Normalisation helpers ─────────────────────────────────────────────────────
+// ---------------------------------------------------------------------------
+// Internal helpers
+// ---------------------------------------------------------------------------
 
-// Momentum is a raw return (e.g. 0.08 = +8%, -0.15 = -15%).
-// Map to 1–10 using a sigmoid-style clamp centred at 0.
-// ±20% maps to roughly 9/1; 0% maps to 5.5 (slight positive bias).
-export function momentumToScore(momentum) {
-  if (momentum == null) return null;
-  // Clamp to ±30% then linearly map to 1–10
-  const clamped = Math.max(-0.30, Math.min(0.30, momentum));
-  return Math.round(((clamped + 0.30) / 0.60) * 9 + 1) * 10 / 10;
+function clamp(val, min, max) {
+  return Math.min(max, Math.max(min, val));
 }
 
-// Sharpe ratio to 1–10.
-// Typical mutual fund range: -1 to +2.5. Map linearly; clamp outside that.
-export function sharpeToScore(sharpe) {
-  if (sharpe == null) return null;
-  const clamped = Math.max(-1.0, Math.min(2.5, sharpe));
-  return Math.round(((clamped + 1.0) / 3.5) * 9 + 1) * 10 / 10;
-}
+// ---------------------------------------------------------------------------
+// Main export
+// ---------------------------------------------------------------------------
 
-// ── Concentration penalty ─────────────────────────────────────────────────────
-// Deduct up to 2 points when the top 3 holdings are heavily concentrated.
-// holdings: array from edgar.js, sorted by weight desc.
-// Only applies to equity funds — bond funds naturally hold many small positions.
-export function calcConcentrationPenalty(holdings) {
-  if (!holdings?.length) return 0;
+/**
+ * Calculates composite scores for all funds.
+ *
+ * @param {Array}  funds          - [{ ticker, name }, ...] from user fund list
+ * @param {Object} mandateScores  - { TICKER: { mandateScore, reasoning } }
+ * @param {Object} tiingoData     - { TICKER: { momentum, riskAdj, sharpe, nav } }
+ * @param {Object} managerScores  - { TICKER: { score, reasoning } }
+ * @param {Object} expenseRatios  - { TICKER: { gross, net, note } }
+ * @param {Object} holdingsMap    - { TICKER: [{ sector, weight, ... }] }
+ * @param {Object} sectorScores   - { sector: score } from thesis (not used in formula, passed through)
+ * @param {Object} weights        - { mandateScore, momentum, riskAdj, managerQuality, risk_tolerance, ... }
+ * @returns {Array} Scored fund objects sorted by composite descending
+ */
+export function calcCompositeScores(
+  funds,
+  mandateScores,
+  tiingoData,
+  managerScores,
+  expenseRatios,
+  holdingsMap,
+  sectorScores,
+  weights
+) {
+  // ── Normalize factor weights so they sum to 1.0 ──────────────────────────
+  const wKeys = ['mandateScore', 'momentum', 'riskAdj', 'managerQuality'];
+  const wSum  = wKeys.reduce((acc, k) => acc + (Number(weights[k]) || 0), 0) || 1;
 
-  // Only penalise equity-heavy funds
-  const equityCount = holdings.filter(h => h.assetCat === 'EC').length;
-  if (equityCount < holdings.length * 0.3) return 0; // <30% equity → skip
+  const W = {};
+  for (const k of wKeys) {
+    W[k] = (Number(weights[k]) || 0) / wSum;
+  }
 
-  const top3Weight = holdings
-    .slice(0, 3)
-    .reduce((sum, h) => sum + (h.weight ?? 0), 0);
+  const results = [];
 
-  if (top3Weight <= 30) return 0;
-  if (top3Weight >= 60) return 2.0;
+  for (const fund of funds) {
+    const ticker = (fund.ticker || '').toUpperCase();
 
-  // Linear: 30% → 0 penalty, 60% → 2.0 penalty
-  return Math.round(((top3Weight - 30) / 30) * 2.0 * 100) / 100;
-}
-
-// ── Main composite scorer ─────────────────────────────────────────────────────
-// Arguments:
-//   ticker         — fund ticker string
-//   mandateScore   — 1–10 from mandate.js (null → 5 fallback)
-//   tiingoMetrics  — { momentum, sharpe } from tiingo.js
-//   managerScore   — 1–10 from manager.js (null → 5 fallback)
-//   expenseResult  — { modifier } from expenses.js
-//   holdings       — array from edgar.js (for concentration penalty)
-//   weights        — { mandateScore, momentum, riskAdj, managerQuality } integers summing to 100
-//
-// Returns:
-// {
-//   composite:           number,   ← 1.0–10.0
-//   breakdown: {
-//     mandateScore:      number,
-//     momentum:          number,
-//     riskAdj:           number,
-//     managerQuality:    number,
-//     concentrationPenalty: number,
-//     expenseModifier:   number,
-//   },
-//   dataQuality: {
-//     mandateFallback:   boolean,
-//     momentumFallback:  boolean,
-//     sharpeFallback:    boolean,
-//     managerFallback:   boolean,
-//     expenseFallback:   boolean,
-//     holdingsFallback:  boolean,
-//   },
-// }
-export function calcCompositeScore({
-  ticker,
-  mandateScore,
-  tiingoMetrics,
-  managerScore,
-  expenseResult,
-  holdings,
-  weights = DEFAULT_WEIGHTS,
-}) {
-  // Money market funds: fixed neutral composite
-  if (MONEY_MARKET_FUNDS.has(ticker)) {
-    return {
-      composite: 5.0,
-      breakdown: {
+    // ── Money Market — fixed 5.0, skip all calculation ──────────────────────
+    if (MONEY_MARKET_TICKERS.has(ticker)) {
+      results.push({
+        ...fund,
+        ticker,
+        composite:            5.0,
         mandateScore:         5.0,
         momentum:             5.0,
         riskAdj:              5.0,
         managerQuality:       5.0,
         concentrationPenalty: 0,
         expenseModifier:      0,
-      },
-      dataQuality: {
-        mandateFallback:  false,
-        momentumFallback: false,
-        sharpeFallback:   false,
-        managerFallback:  false,
-        expenseFallback:  false,
-        holdingsFallback: false,
-      },
+        sectorBreakdown:      {},
+        mandateReasoning:     null,
+        managerReasoning:     null,
+        isMoneyMarket:        true,
+        dataQuality: {
+          mandateFallback:  false,
+          momentumFallback: false,
+          riskAdjFallback:  false,
+          managerFallback:  false,
+          fallbackCount:    0,
+        },
+      });
+      continue;
+    }
+
+    // ── Sub-score lookup with 5.0 fallback + dataQuality tracking ───────────
+    const mandateRaw  = mandateScores?.[ticker]?.mandateScore ?? null;
+    const momentumRaw = tiingoData?.[ticker]?.momentum        ?? null;
+    const riskAdjRaw  = tiingoData?.[ticker]?.riskAdj         ?? null;
+    const managerRaw  = managerScores?.[ticker]?.score        ?? null;
+
+    const mandateFallback  = mandateRaw  === null;
+    const momentumFallback = momentumRaw === null;
+    const riskAdjFallback  = riskAdjRaw  === null;
+    const managerFallback  = managerRaw  === null;
+
+    const mandateScore   = mandateFallback  ? 5.0 : Number(mandateRaw);
+    const momentum       = momentumFallback ? 5.0 : Number(momentumRaw);
+    const riskAdj        = riskAdjFallback  ? 5.0 : Number(riskAdjRaw);
+    const managerQuality = managerFallback  ? 5.0 : Number(managerRaw);
+
+    const fallbackCount = [mandateFallback, momentumFallback, riskAdjFallback, managerFallback]
+      .filter(Boolean).length;
+
+    const dataQuality = {
+      mandateFallback,
+      momentumFallback,
+      riskAdjFallback,
+      managerFallback,
+      fallbackCount,
     };
+
+    // ── Concentration penalty from holdings (HHI) ────────────────────────────
+    let concentrationPenalty = 0;
+    let sectorBreakdown      = {};
+
+    const holdings = holdingsMap?.[ticker];
+    if (Array.isArray(holdings) && holdings.length > 0) {
+      // Aggregate raw weights by sector
+      const sectorWeights = {};
+      let totalWeight = 0;
+
+      for (const h of holdings) {
+        const sector = h.sector;
+        if (!sector) continue;
+        const w = Number(h.weight) || 0;
+        sectorWeights[sector] = (sectorWeights[sector] ?? 0) + w;
+        totalWeight += w;
+      }
+
+      if (totalWeight > 0) {
+        // Convert to percentages
+        for (const [sec, w] of Object.entries(sectorWeights)) {
+          sectorBreakdown[sec] = parseFloat(((w / totalWeight) * 100).toFixed(2));
+        }
+
+        // HHI = Σ (pct / 100)²
+        const hhi = Object.values(sectorBreakdown)
+          .reduce((acc, pct) => acc + Math.pow(pct / 100, 2), 0);
+
+        concentrationPenalty = Math.max(0, (hhi - 0.18) * 1.5);
+      }
+    }
+
+    // ── Expense modifier ────────────────────────────────────────────────────
+    let expenseModifier = 0;
+    const expData = expenseRatios?.[ticker];
+    if (expData && expData.net != null) {
+      const net = Number(expData.net);
+      if      (net < 0.005)  expenseModifier =  0.3;
+      else if (net > 0.012)  expenseModifier = -0.3;
+      // else modifier stays 0
+    }
+
+    // ── Composite formula ────────────────────────────────────────────────────
+    const raw =
+      mandateScore   * W.mandateScore +
+      momentum       * W.momentum     +
+      riskAdj        * W.riskAdj      +
+      managerQuality * W.managerQuality;
+
+    const penalised = raw - concentrationPenalty;
+    const modified  = penalised + expenseModifier;
+    const composite = clamp(modified, 1.0, 10.0);
+
+    results.push({
+      ...fund,
+      ticker,
+      composite:            parseFloat(composite.toFixed(3)),
+      mandateScore:         parseFloat(mandateScore.toFixed(3)),
+      momentum:             parseFloat(momentum.toFixed(3)),
+      riskAdj:              parseFloat(riskAdj.toFixed(3)),
+      managerQuality:       parseFloat(managerQuality.toFixed(3)),
+      concentrationPenalty: parseFloat(concentrationPenalty.toFixed(4)),
+      expenseModifier,
+      sectorBreakdown,
+      dataQuality,
+      isMoneyMarket:    false,
+      mandateReasoning: mandateScores?.[ticker]?.reasoning  ?? null,
+      managerReasoning: managerScores?.[ticker]?.reasoning  ?? null,
+    });
   }
 
-  // Normalise weights to fractions
-  const total = (weights.mandateScore ?? 40)
-              + (weights.momentum     ?? 25)
-              + (weights.riskAdj      ?? 20)
-              + (weights.managerQuality ?? 15);
-
-  const W = {
-    mandate: (weights.mandateScore  ?? 40) / total,
-    momentum: (weights.momentum     ?? 25) / total,
-    riskAdj:  (weights.riskAdj      ?? 20) / total,
-    manager:  (weights.managerQuality ?? 15) / total,
-  };
-
-  // Sub-scores with fallback tracking
-  const dataQuality = {
-    mandateFallback:  false,
-    momentumFallback: false,
-    sharpeFallback:   false,
-    managerFallback:  false,
-    expenseFallback:  false,
-    holdingsFallback: false,
-  };
-
-  const mandate = mandateScore != null ? mandateScore : (dataQuality.mandateFallback = true, 5.0);
-
-  const rawMomentum = momentumToScore(tiingoMetrics?.momentum ?? null);
-  const momentum    = rawMomentum  != null ? rawMomentum  : (dataQuality.momentumFallback = true, 5.0);
-
-  const rawSharpe = sharpeToScore(tiingoMetrics?.sharpe ?? null);
-  const sharpe    = rawSharpe != null ? rawSharpe : (dataQuality.sharpeFallback = true, 5.0);
-
-  const manager = managerScore != null ? managerScore : (dataQuality.managerFallback = true, 5.0);
-
-  const expenseModifier = expenseResult?.modifier ?? (dataQuality.expenseFallback = true, 0);
-
-  if (!holdings?.length) dataQuality.holdingsFallback = true;
-
-  // Weighted sum
-  const raw = (mandate  * W.mandate)
-            + (momentum * W.momentum)
-            + (sharpe   * W.riskAdj)
-            + (manager  * W.manager);
-
-  // Concentration penalty
-  const concentrationPenalty = calcConcentrationPenalty(holdings);
-
-  // Apply expense modifier and clamp
-  const modified  = raw - concentrationPenalty + expenseModifier;
-  const composite = Math.round(Math.max(1.0, Math.min(10.0, modified)) * 10) / 10;
-
-  // DEBUG — remove after diagnosis
-  console.log(`[score] ${ticker} | mandate=${Math.round(mandate*10)/10} mom=${Math.round(momentum*10)/10} sharpe=${Math.round(sharpe*10)/10} mgr=${Math.round(manager*10)/10} exp=${expenseModifier} conc=${concentrationPenalty} → ${composite}`);
-
-  return {
-    composite,
-    breakdown: {
-      mandateScore:         Math.round(mandate  * 10) / 10,
-      momentum:             Math.round(momentum * 10) / 10,
-      riskAdj:              Math.round(sharpe   * 10) / 10,
-      managerQuality:       Math.round(manager  * 10) / 10,
-      concentrationPenalty: Math.round(concentrationPenalty * 100) / 100,
-      expenseModifier:      Math.round(expenseModifier       * 100) / 100,
-    },
-    dataQuality,
-  };
+  // Sort by composite descending
+  return results.sort((a, b) => b.composite - a.composite);
 }
