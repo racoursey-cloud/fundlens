@@ -401,7 +401,7 @@ export default function FundDetailSidebar() {
 
   const allocDisplay =
     fund.allocPct > 0
-      ? `${(fund.allocPct * 100).toFixed(1)}% allocation`
+      ? `${fund.allocPct.toFixed(1)}% allocation`
       : 'Not allocated';
 
   const mandateReasoning = mandateScores?.[selectedFund]?.reasoning ?? null;
