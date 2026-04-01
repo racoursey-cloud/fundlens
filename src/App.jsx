@@ -6,81 +6,12 @@
 // the auth token was restored, routing users back to the setup wizard.
 
 import { useEffect, useState } from 'react';
-import { supabase } from './services/supabase.js';
+import { supabase }   from './services/supabase.js';
+import useAppStore    from './store/useAppStore.js';
 
 import LoginPage   from './components/auth/LoginPage.jsx';
 import SetupWizard from './components/wizard/SetupWizard.jsx';
-
-// ─── AppShell placeholder (replaced in Phase 3) ───────────────────────────────
-// The real AppShell (with three-tab layout, pipeline overlay, etc.) is built
-// in Phase 3. This stub lets auth routing work end-to-end in Phase 1.
-const AppShell = () => (
-  <div style={{
-    minHeight: '100vh',
-    background: '#0e0f11',
-    display: 'flex',
-    flexDirection: 'column',
-    alignItems: 'center',
-    justifyContent: 'center',
-    padding: '40px',
-    textAlign: 'center',
-  }}>
-    <div style={{
-      background: '#16181c',
-      border: '1px solid #25282e',
-      borderRadius: 16,
-      padding: '40px 48px',
-      maxWidth: 440,
-      width: '100%',
-    }}>
-      <div style={{
-        fontSize: 11,
-        fontWeight: 700,
-        letterSpacing: '0.12em',
-        color: '#3b82f6',
-        textTransform: 'uppercase',
-        fontFamily: 'Inter, sans-serif',
-        marginBottom: 12,
-      }}>
-        FundLens
-      </div>
-      <h1 style={{
-        fontSize: 22,
-        fontWeight: 700,
-        color: '#f9fafb',
-        marginBottom: 8,
-        fontFamily: 'Inter, sans-serif',
-      }}>
-        You're in.
-      </h1>
-      <p style={{
-        fontFamily: 'Inter, sans-serif',
-        fontSize: 14,
-        color: '#6b7280',
-        lineHeight: 1.6,
-        marginBottom: 28,
-      }}>
-        Your profile is set up. The portfolio engine and scoring pipeline are
-        coming in the next phase.
-      </p>
-      <button
-        onClick={() => supabase.auth.signOut()}
-        style={{
-          padding: '10px 20px',
-          background: 'transparent',
-          color: '#6b7280',
-          border: '1px solid #25282e',
-          borderRadius: 8,
-          cursor: 'pointer',
-          fontFamily: 'Inter, sans-serif',
-          fontSize: 13,
-        }}
-      >
-        Sign Out
-      </button>
-    </div>
-  </div>
-);
+import AppShell    from './components/layout/AppShell.jsx';
 
 // ─── supaFetch helper ─────────────────────────────────────────────────────────
 // Used here only for the profile check on mount.
@@ -110,27 +41,27 @@ async function supaFetch(path, options = {}) {
 // component fires a Supabase or API query before auth is confirmed.
 const LoadingScreen = () => (
   <div style={{
-    position: 'fixed',
-    inset: 0,
-    background: '#0e0f11',
-    display: 'flex',
-    flexDirection: 'column',
-    alignItems: 'center',
+    position:       'fixed',
+    inset:          0,
+    background:     '#0e0f11',
+    display:        'flex',
+    flexDirection:  'column',
+    alignItems:     'center',
     justifyContent: 'center',
-    gap: '20px',
+    gap:            '20px',
   }}>
     <div style={{
-      width: '36px',
-      height: '36px',
-      border: '3px solid #25282e',
+      width:          '36px',
+      height:         '36px',
+      border:         '3px solid #25282e',
       borderTopColor: '#3b82f6',
-      borderRadius: '50%',
-      animation: 'fl-spin 0.75s linear infinite',
+      borderRadius:   '50%',
+      animation:      'fl-spin 0.75s linear infinite',
     }} />
     <span style={{
-      color: '#6b7280',
-      fontSize: '13px',
-      fontFamily: 'Inter, sans-serif',
+      color:       '#6b7280',
+      fontSize:    '13px',
+      fontFamily:  'Inter, sans-serif',
       letterSpacing: '0.02em',
     }}>
       Loading…
@@ -158,6 +89,12 @@ export default function App() {
       const profile = Array.isArray(rows) ? rows[0] : null;
       const hasName = profile?.name && profile.name.trim().length > 0;
       setNeedsSetup(!hasName);
+
+      // Populate the store so every tab has user data before it renders.
+      // Only call when the profile is complete (no point seeding a partial user).
+      if (hasName) {
+        await useAppStore.getState().initUser(user);
+      }
     } catch (err) {
       console.error('[App] profile check failed:', err);
       setNeedsSetup(true);
@@ -211,7 +148,7 @@ export default function App() {
 
   // ── onSetupComplete ────────────────────────────────────────────────────────
   // Re-checks profile after wizard saves so we confirm name exists before
-  // advancing to AppShell.
+  // advancing to AppShell. Also seeds the store now that setup is done.
   const onSetupComplete = async () => {
     if (session?.user) {
       await checkProfile(session.user);
