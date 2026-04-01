@@ -96,15 +96,15 @@ export function computeOutliersAndAllocation(scoredFunds, riskTolerance) {
 
   const totalRaw = rawEntries.reduce((acc, e) => acc + e.rawWeight, 0) || 1;
 
-  // Normalise to 100%
+  // Normalise to 1.0 (fractional — FundDetailSidebar multiplies ×100 for display)
   const allocMap = {};
   for (const { ticker, rawWeight } of rawEntries) {
-    allocMap[ticker] = (rawWeight / totalRaw) * 100;
+    allocMap[ticker] = rawWeight / totalRaw;  // fraction 0-1; sidebar multiplies by 100 for display
   }
 
   // ── STEP 4 — 30% Position Cap ─────────────────────────────────────────────
   // Iteratively redistribute excess from capped funds to uncapped funds.
-  const CAP = 30;
+  const CAP = 0.30;  // 30% expressed as fraction
 
   for (let iter = 0; iter < 30; iter++) {
     const capped   = Object.entries(allocMap).filter(([, v]) => v >  CAP);
@@ -129,18 +129,18 @@ export function computeOutliersAndAllocation(scoredFunds, riskTolerance) {
   // ── STEP 5 — Final Cleanup ────────────────────────────────────────────────
   // Round each position to 1 decimal place.
   for (const ticker of Object.keys(allocMap)) {
-    allocMap[ticker] = parseFloat(allocMap[ticker].toFixed(1));
+    allocMap[ticker] = parseFloat(allocMap[ticker].toFixed(4));
   }
 
   // Absorb rounding error into the largest position.
   const roundedSum = Object.values(allocMap).reduce((a, b) => a + b, 0);
-  const diff       = parseFloat((100.0 - roundedSum).toFixed(1));
+  const diff       = parseFloat((1.0  - roundedSum).toFixed(4));
 
   if (diff !== 0 && Object.keys(allocMap).length > 0) {
     const largest = Object.entries(allocMap)
       .sort(([, a], [, b]) => b - a)[0]?.[0];
     if (largest) {
-      allocMap[largest] = parseFloat((allocMap[largest] + diff).toFixed(1));
+      allocMap[largest] = parseFloat((allocMap[largest] + diff).toFixed(4));
     }
   }
 
