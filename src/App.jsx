@@ -1,257 +1,220 @@
-import { useState, useEffect, useCallback } from 'react';
-import { supabase } from './services/supabase.js';
-import { useAppStore } from './store/useAppStore.js';
-import LoginPage from './components/auth/LoginPage.jsx';
-import SetupWizard from './components/wizard/SetupWizard.jsx';
-import AppShell from './components/layout/AppShell.jsx';
+// src/App.jsx
+// Root application component.
+// Handles three states: loading (checking session), unauthenticated, authenticated.
+// Auth is confirmed via supabase.auth.getSession() BEFORE any data fetch.
+// This prevents the v4 race condition where Supabase queries fired before
+// the auth token was restored, routing users back to the setup wizard.
 
-// ── Supabase proxy query ──────────────────────────────────────────────────────
-// Routes through /api/supabase (Railway proxy injects the service_role key).
-// This bypasses RLS entirely and does NOT depend on the Supabase JS client's
-// auth state. The Supabase JS client is ONLY used for auth \u2014 never for
-// table queries.
-async function proxyQuery(path) {
+import { useEffect, useState } from 'react';
+import { supabase } from './services/supabase.js';
+
+// ─── Lazy imports ─────────────────────────────────────────────────────────────
+// These components are built in subsequent phases. Importing them here
+// keeps the routing logic co-located and lets each component be swapped
+// in without touching App.jsx again.
+import LoginPage   from './components/auth/LoginPage.jsx';
+import SetupWizard from './components/wizard/SetupWizard.jsx';
+
+// ─── AppShell placeholder (replaced in Phase 3) ───────────────────────────────
+// The real AppShell (with three-tab layout, pipeline overlay, etc.) is built
+// in Phase 3. This stub lets auth routing work end-to-end in Phase 1.
+const AppShell = () => (
+  <div style={{ padding: '40px', color: '#9ca3af', textAlign: 'center' }}>
+    <h1 style={{
+      fontSize: '24px',
+      fontWeight: '700',
+      color: '#e5e7eb',
+      marginBottom: '8px',
+      fontFamily: 'Inter, sans-serif',
+    }}>
+      FundLens v5
+    </h1>
+    <p style={{ fontFamily: 'Inter, sans-serif', fontSize: '14px' }}>
+      App loaded. Pipeline and UI coming in Phase 2–3.
+    </p>
+    <button
+      onClick={() => supabase.auth.signOut()}
+      style={{
+        marginTop: '20px',
+        padding: '8px 16px',
+        background: '#25282e',
+        color: '#9ca3af',
+        border: '1px solid #25282e',
+        borderRadius: '6px',
+        cursor: 'pointer',
+        fontFamily: 'Inter, sans-serif',
+        fontSize: '13px',
+      }}
+    >
+      Sign Out
+    </button>
+  </div>
+);
+
+// ─── supaFetch helper ─────────────────────────────────────────────────────────
+// Mirrors the signature in cache.js. Used here only for the profile check
+// on mount; all engine files import supaFetch from cache.js directly.
+// When cache.js is available this import can replace the inline copy:
+//   import { supaFetch } from './services/cache.js';
+async function supaFetch(path, options = {}) {
   const res = await fetch(`/api/supabase${path}`, {
-    headers: { 'Content-Type': 'application/json' },
+    ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...(options.headers || {}),
+    },
   });
   if (!res.ok) {
     const text = await res.text().catch(() => '');
-    throw new Error(`Supabase proxy ${res.status}: ${text.slice(0, 200)}`);
+    throw new Error(`supaFetch ${path} → ${res.status}: ${text}`);
   }
-  if (res.status === 204) return null;
   return res.json();
 }
 
-// Attempt a proxy query with a timeout. THROWS on timeout instead of returning
-// a fallback \u2014 the caller must distinguish "no rows" from "query failed."
-async function timedQuery(path, ms) {
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error(`Query timed out after ${ms}ms: ${path}`)), ms);
-    proxyQuery(path)
-      .then(result => { clearTimeout(timer); resolve(result); })
-      .catch(err   => { clearTimeout(timer); reject(err); });
-  });
-}
+// ─── Loading spinner ──────────────────────────────────────────────────────────
+// Shown while getSession() is in-flight. Blocks ALL rendering so no child
+// component fires a Supabase or API query before auth is confirmed.
+const LoadingScreen = () => (
+  <div style={{
+    position: 'fixed',
+    inset: 0,
+    background: '#0e0f11',
+    display: 'flex',
+    flexDirection: 'column',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: '20px',
+  }}>
+    {/* Spinner */}
+    <div style={{
+      width: '36px',
+      height: '36px',
+      border: '3px solid #25282e',
+      borderTopColor: '#3b82f6',
+      borderRadius: '50%',
+      animation: 'fl-spin 0.75s linear infinite',
+    }} />
+    <span style={{
+      color: '#6b7280',
+      fontSize: '13px',
+      fontFamily: 'Inter, sans-serif',
+      letterSpacing: '0.02em',
+    }}>
+      Loading…
+    </span>
 
+    {/* Keyframes injected once — no CSS-in-JS library required */}
+    <style>{`
+      @keyframes fl-spin {
+        to { transform: rotate(360deg); }
+      }
+    `}</style>
+  </div>
+);
+
+// ─── Root component ───────────────────────────────────────────────────────────
 export default function App() {
-  const setUser        = useAppStore(s => s.setUser);
-  const setProfile     = useAppStore(s => s.setProfile);
-  const setUserFunds   = useAppStore(s => s.setUserFunds);
-  const setUserWeights = useAppStore(s => s.setUserWeights);
-  const profile        = useAppStore(s => s.profile);
-  const userFunds      = useAppStore(s => s.userFunds);
+  // true until getSession() resolves — gates ALL rendering
+  const [loading,    setLoading]    = useState(true);
+  // null = not logged in, object = Supabase session
+  const [session,    setSession]    = useState(null);
+  // true = profile missing or name absent → show SetupWizard
+  const [needsSetup, setNeedsSetup] = useState(false);
 
-  const [session,      setSession]      = useState(null);
-  const [authLoading,  setAuthLoading]  = useState(true);
-  const [dataLoading,  setDataLoading]  = useState(false);
-  const [dataLoaded,   setDataLoaded]   = useState(false);
-  const [dataError,    setDataError]    = useState(null);
-  const [authError,    setAuthError]    = useState(null);
+  // ── Profile check ──────────────────────────────────────────────────────────
+  // Called after session is confirmed. Fetches the user's row from
+  // fund_profiles via the Railway proxy. If the row is absent or the name
+  // field is empty the user must complete the setup wizard before the
+  // main app is shown.
+  const checkProfile = async (user) => {
+    try {
+      const rows = await supaFetch(`/profiles?id=eq.${user.id}`);
+      const profile = Array.isArray(rows) ? rows[0] : null;
+      const hasName = profile?.name && profile.name.trim().length > 0;
+      setNeedsSetup(!hasName);
+    } catch (err) {
+      // If the profile fetch fails (e.g. network error on first load)
+      // send the user through setup rather than dropping them into a
+      // broken app state.
+      console.error('[App] profile check failed:', err);
+      setNeedsSetup(true);
+    }
+  };
 
-  // Load user data via the /api/supabase proxy (service_role key, bypasses RLS).
-  // Retries once on failure before surfacing an error. Never silently falls
-  // through to the wizard \u2014 if data can't be loaded, the user sees a retry
-  // screen instead.
-  const loadUserData = useCallback(async (userId) => {
-    setDataLoading(true);
-    setDataError(null);
-    setDataLoaded(false);
+  // ── Mount: resolve session FIRST, then profile ────────────────────────────
+  useEffect(() => {
+    let mounted = true;
 
-    const uid = encodeURIComponent(userId);
-    const TIMEOUT = 15000;
-    const MAX_ATTEMPTS = 2;
-
-    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    (async () => {
       try {
-        console.log(`[App] loadUserData attempt ${attempt}/${MAX_ATTEMPTS}...`);
+        // RACE CONDITION FIX: getSession() must complete before ANY
+        // downstream data fetch. The loading gate (loading === true)
+        // ensures no child component renders — and therefore no API call
+        // fires — until this promise resolves.
+        const { data: { session: existingSession } } = await supabase.auth.getSession();
 
-        // Run all three queries in parallel \u2014 these go through the Railway
-        // proxy with the service_role key, so they don't depend on the user's
-        // JWT being refreshed yet.
-        const [profileRows, fundsRows, weightsRows] = await Promise.all([
-          timedQuery(`/profiles?id=eq.${uid}&limit=1`, TIMEOUT),
-          timedQuery(`/user_funds?user_id=eq.${uid}&order=sort_order`, TIMEOUT),
-          timedQuery(`/user_weights?user_id=eq.${uid}&limit=1`, TIMEOUT),
-        ]);
+        if (!mounted) return;
 
-        const profileData = Array.isArray(profileRows) && profileRows.length > 0
-          ? profileRows[0]
-          : null;
-        const weightsData = Array.isArray(weightsRows) && weightsRows.length > 0
-          ? weightsRows[0]
-          : null;
+        setSession(existingSession);
 
-        console.log('[App] profiles:', profileData ? 'OK' : 'empty');
-        console.log('[App] user_funds:', (fundsRows || []).length, 'rows');
-        console.log('[App] user_weights:', weightsData ? 'OK' : 'empty');
-
-        setProfile(profileData);
-        setUserFunds(fundsRows || []);
-        setUserWeights(weightsData);
-        setDataLoaded(true);
-        setDataLoading(false);
-        return; // success \u2014 exit the retry loop
+        if (existingSession?.user) {
+          await checkProfile(existingSession.user);
+        }
       } catch (err) {
-        console.warn(`[App] loadUserData attempt ${attempt} failed:`, err.message);
-        if (attempt < MAX_ATTEMPTS) {
-          // Wait 2s before retrying \u2014 gives Railway proxy time to warm up
-          await new Promise(r => setTimeout(r, 2000));
-        } else {
-          // All attempts exhausted \u2014 surface the error
-          console.error('[App] loadUserData failed after', MAX_ATTEMPTS, 'attempts');
-          setDataError(err.message);
-          setDataLoading(false);
-          return;
+        console.error('[App] getSession failed:', err);
+        // Fall through to unauthenticated state
+        if (mounted) setSession(null);
+      } finally {
+        if (mounted) setLoading(false);
+      }
+    })();
+
+    // ── Auth state subscription ─────────────────────────────────────────────
+    // Handles login (from LoginPage) and logout (from AppShell sign-out
+    // button or session expiry). Does NOT re-enter the loading gate —
+    // that is only for the initial mount check.
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(
+      async (event, newSession) => {
+        if (!mounted) return;
+
+        setSession(newSession);
+
+        if (event === 'SIGNED_IN' && newSession?.user) {
+          await checkProfile(newSession.user);
+        }
+
+        if (event === 'SIGNED_OUT') {
+          setNeedsSetup(false);
         }
       }
-    }
-  }, [setProfile, setUserFunds, setUserWeights]);
-
-  useEffect(() => {
-    // Handle Supabase auth redirect hash errors (e.g. expired OTP link)
-    const hash = window.location.hash;
-    if (hash.includes('error=')) {
-      const params = new URLSearchParams(hash.replace('#', ''));
-      const desc = params.get('error_description') || 'Authentication error';
-      setAuthError(desc.replace(/\+/g, ' '));
-      window.history.replaceState(null, '', window.location.pathname);
-      setAuthLoading(false);
-      return;
-    }
-
-    // Normal session boot.
-    // getSession() reads from localStorage first so it usually resolves fast,
-    // but on slow networks the token-refresh round-trip can take a few seconds.
-    console.log('[App] Calling getSession...');
-
-    const bootTimeout = setTimeout(() => {
-      console.warn('[App] getSession timed out after 10s');
-      setAuthLoading(false);
-    }, 10000);
-
-    supabase.auth.getSession()
-      .then(async ({ data: { session: s } }) => {
-        clearTimeout(bootTimeout);
-        console.log('[App] getSession resolved, session:', s ? 'YES' : 'NO');
-        setSession(s);
-        setUser(s?.user ?? null);
-        if (s?.user) await loadUserData(s.user.id);
-        setAuthLoading(false);
-      })
-      .catch(err => {
-        clearTimeout(bootTimeout);
-        console.error('[App] getSession failed:', err);
-        setAuthLoading(false);
-      });
-
-    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, s) => {
-      setSession(s);
-      setUser(s?.user ?? null);
-      if (s?.user && (event === 'SIGNED_IN' || event === 'TOKEN_REFRESHED')) {
-        await loadUserData(s.user.id);
-      }
-      if (event === 'SIGNED_OUT') {
-        setProfile(null);
-        setUserFunds([]);
-        setUserWeights(null);
-        setDataLoaded(false);
-        setDataError(null);
-      }
-    });
+    );
 
     return () => {
-      clearTimeout(bootTimeout);
+      mounted = false;
       subscription.unsubscribe();
     };
-  }, []);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ── Auth error screen ─────────────────────────────────────────────────────
-  if (authError) {
-    return (
-      <div style={{ minHeight:'100vh', display:'flex', flexDirection:'column', alignItems:'center',
-        justifyContent:'center', background:'var(--bg)', gap:'16px' }}>
-        <div className="app-logo" style={{ fontSize:'22px' }}>Fund<span>Lens</span></div>
-        <div style={{ background:'var(--surface)', border:'1px solid var(--danger,#e55)', borderRadius:'8px',
-          padding:'24px 32px', maxWidth:'400px', textAlign:'center' }}>
-          <p style={{ color:'var(--danger,#e55)', marginBottom:'12px', fontWeight:600 }}>Link Expired</p>
-          <p style={{ color:'var(--text2)', fontSize:'13px', marginBottom:'20px' }}>{authError}</p>
-          <button onClick={() => setAuthError(null)}
-            style={{ background:'var(--accent)', color:'#fff', border:'none', borderRadius:'6px',
-              padding:'10px 24px', cursor:'pointer', fontWeight:600 }}>
-            Back to Sign In
-          </button>
-        </div>
-      </div>
-    );
-  }
+  // ── onSetupComplete ────────────────────────────────────────────────────────
+  // Passed to SetupWizard. Called when the wizard saves the profile.
+  // Re-fetches profile so we confirm the row now has a name before
+  // advancing to AppShell.
+  const onSetupComplete = async () => {
+    if (session?.user) {
+      await checkProfile(session.user);
+    } else {
+      setNeedsSetup(false);
+    }
+  };
 
-  // ── Loading spinner ───────────────────────────────────────────────────────
-  if (authLoading || dataLoading) {
-    return (
-      <div style={{ minHeight:'100vh', display:'flex', flexDirection:'column', alignItems:'center',
-        justifyContent:'center', background:'var(--bg)', gap:'16px' }}>
-        <div className="app-logo" style={{ fontSize:'22px' }}>Fund<span>Lens</span></div>
-        <span className="spinner" style={{ width:24, height:24, borderWidth:3 }} />
-        <p style={{ fontSize:'12px', color:'var(--text3)' }}>
-          {authLoading ? 'Checking session...' : 'Loading your profile...'}
-        </p>
-      </div>
-    );
-  }
+  // ── Render gate ────────────────────────────────────────────────────────────
+  // Nothing renders until auth is confirmed. This is the single source of
+  // truth that prevents the v4 race condition.
+  if (loading) return <LoadingScreen />;
 
-  // ── Data load error \u2014 retry screen instead of silent wizard redirect ───
-  if (dataError && session) {
-    return (
-      <div style={{ minHeight:'100vh', display:'flex', flexDirection:'column', alignItems:'center',
-        justifyContent:'center', background:'var(--bg)', gap:'16px' }}>
-        <div className="app-logo" style={{ fontSize:'22px' }}>Fund<span>Lens</span></div>
-        <div style={{ background:'var(--surface)', border:'1px solid var(--border,#333)', borderRadius:'8px',
-          padding:'24px 32px', maxWidth:'440px', textAlign:'center' }}>
-          <p style={{ color:'var(--text1,#eee)', marginBottom:'8px', fontWeight:600 }}>
-            Couldn{'\u2019'}t load your data
-          </p>
-          <p style={{ color:'var(--text3,#888)', fontSize:'13px', marginBottom:'20px' }}>
-            The server took too long to respond. This usually resolves on a retry.
-          </p>
-          <div style={{ display:'flex', gap:'12px', justifyContent:'center' }}>
-            <button onClick={() => loadUserData(session.user.id)}
-              style={{ background:'var(--accent)', color:'#fff', border:'none', borderRadius:'6px',
-                padding:'10px 24px', cursor:'pointer', fontWeight:600 }}>
-              Try Again
-            </button>
-            <button onClick={async () => { await supabase.auth.signOut(); }}
-              style={{ background:'transparent', color:'var(--text3,#888)', border:'1px solid var(--border,#333)',
-                borderRadius:'6px', padding:'10px 24px', cursor:'pointer', fontWeight:500 }}>
-              Sign Out
-            </button>
-          </div>
-        </div>
-      </div>
-    );
-  }
-
-  // ── Routing ───────────────────────────────────────────────────────────────
   if (!session) return <LoginPage />;
 
-  // CRITICAL: Only route to wizard if data was successfully loaded AND the
-  // user genuinely has no funds. Without the dataLoaded guard, a failed
-  // query (which leaves userFunds as []) would incorrectly show the wizard.
-  if (dataLoaded && userFunds.length === 0) {
-    return <SetupWizard onComplete={() => loadUserData(session.user.id)} />;
-  }
+  if (needsSetup) return <SetupWizard onComplete={onSetupComplete} />;
 
-  // If we have a session but data hasn't loaded yet (edge case: onAuthStateChange
-  // fired before getSession completed), show the spinner.
-  if (!dataLoaded) {
-    return (
-      <div style={{ minHeight:'100vh', display:'flex', flexDirection:'column', alignItems:'center',
-        justifyContent:'center', background:'var(--bg)', gap:'16px' }}>
-        <div className="app-logo" style={{ fontSize:'22px' }}>Fund<span>Lens</span></div>
-        <span className="spinner" style={{ width:24, height:24, borderWidth:3 }} />
-        <p style={{ fontSize:'12px', color:'var(--text3)' }}>Loading your profile...</p>
-      </div>
-    );
-  }
-
-  return <AppShell userFunds={userFunds} profile={profile} onSettingsChange={() => loadUserData(session.user.id)} />;
+  return <AppShell />;
 }
