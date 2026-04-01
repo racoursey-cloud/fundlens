@@ -1,3 +1,19 @@
+// =============================================================================
+// FundLens v5 — src/engine/constants.js
+// Single source of truth for all configuration constants.
+// No other file should hardcode fund lists, sector names, weights, or thresholds.
+// =============================================================================
+
+// ---------------------------------------------------------------------------
+// AI Model
+// ---------------------------------------------------------------------------
+
+export const CLAUDE_MODEL = 'claude-haiku-4-5-20251001';
+
+// ---------------------------------------------------------------------------
+// Fund Universe (22 funds)
+// ---------------------------------------------------------------------------
+
 export const DEFAULT_FUNDS = [
   { ticker: 'PRPFX', name: 'Permanent Portfolio I' },
   { ticker: 'WFPRX', name: 'Allspring Special Mid Cap Value' },
@@ -23,189 +39,150 @@ export const DEFAULT_FUNDS = [
   { ticker: 'FSPGX', name: 'Fidelity Large Cap Growth Index' },
 ];
 
+// ---------------------------------------------------------------------------
+// Money Market Funds (fixed score 5.0, skip pipeline scoring)
+// ---------------------------------------------------------------------------
+
+export const MONEY_MARKET_TICKERS = new Set(['FDRXX', 'ADAXX']);
+
+// ---------------------------------------------------------------------------
+// GICS Sectors — { etf, color }
+// ---------------------------------------------------------------------------
+
 export const GICS_SECTORS = {
-  'Technology':               { etf: 'XLK',  color: '#1D4ED8' },
-  'Financials':               { etf: 'XLF',  color: '#059669' },
-  'Healthcare':               { etf: 'XLV',  color: '#DC2626' },
-  'Consumer Discretionary':   { etf: 'XLY',  color: '#D97706' },
-  'Consumer Staples':         { etf: 'XLP',  color: '#7C3AED' },
-  'Energy':                   { etf: 'XLE',  color: '#B45309' },
-  'Industrials':              { etf: 'XLI',  color: '#0891B2' },
-  'Materials':                { etf: 'XLB',  color: '#65A30D' },
-  'Utilities':                { etf: 'XLU',  color: '#6B7280' },
-  'Real Estate':              { etf: 'XLRE', color: '#EC4899' },
-  'Communication Services':   { etf: 'XLC',  color: '#8B5CF6' },
+  'Technology':             { etf: 'XLK',  color: '#1D4ED8' },
+  'Financials':             { etf: 'XLF',  color: '#059669' },
+  'Healthcare':             { etf: 'XLV',  color: '#DC2626' },
+  'Consumer Discretionary': { etf: 'XLY',  color: '#D97706' },
+  'Consumer Staples':       { etf: 'XLP',  color: '#7C3AED' },
+  'Energy':                 { etf: 'XLE',  color: '#B45309' },
+  'Industrials':            { etf: 'XLI',  color: '#0891B2' },
+  'Materials':              { etf: 'XLB',  color: '#65A30D' },
+  'Utilities':              { etf: 'XLU',  color: '#6B7280' },
+  'Real Estate':            { etf: 'XLRE', color: '#EC4899' },
+  'Communication Services': { etf: 'XLC',  color: '#8B5CF6' },
 };
 
-export const FRED_SERIES = {
-  DFF:          'Fed Funds Rate',
-  T10Y2Y:       '10Y-2Y Yield Curve',
-  CPIAUCSL:     'CPI YoY',
-  UNRATE:       'Unemployment Rate',
-  BAMLH0A0HYM2: 'HY Credit Spread',
-  DCOILWTICO:   'WTI Crude Oil (daily)',
-  INDPRO:       'Industrial Production',
-  UMCSENT:      'Consumer Sentiment',
-  T10YIE:       'Breakeven Inflation 10Y',
-  DTWEXBGS:     'USD Broad Index',
+// ---------------------------------------------------------------------------
+// Scoring Weights (must sum to 100)
+// ---------------------------------------------------------------------------
+
+export const DEFAULT_WEIGHTS = {
+  mandateScore:   40,
+  momentum:       25,
+  riskAdj:        20,
+  managerQuality: 15,
 };
 
-export const MONEY_MARKET_FUNDS = new Set(['FDRXX', 'ADAXX']);
-
-export const COMPANY_CODES = {
-  TA26: { name: 'TerrAscend', funds: DEFAULT_FUNDS },
-};
-
-// Per-fund notable facts displayed in Rankings tab and passed to manager.js.
-// Structure: array of { text, sentiment } per ticker.
-// Each fund can have multiple simultaneous alerts — positive, negative, or neutral.
-// sentiment values: 'positive' | 'negative' | 'neutral'
-// Claude receives all alerts and assesses each on its own merits.
-export const ALERTS = {
-  PRPFX: [{ text: 'Single-manager risk (Cuggino)',          sentiment: 'negative' }],
-  QFVRX: [{ text: 'Fee waiver expires 7/31/2026',           sentiment: 'negative' }],
-  RNWGX: [{ text: 'Benchmark changed 1/1/2026',             sentiment: 'neutral'  }],
-  VWIGX: [{ text: 'Beta 1.34; Baillie Gifford modifying',   sentiment: 'neutral'  }],
-  WFPRX: [{ text: '2025 underperformed benchmark 4.82pp',   sentiment: 'negative' }],
-  OIBIX: [{ text: 'New manager Block added 2025',           sentiment: 'neutral'  }],
-  MADFX: [{ text: 'AUM ~$55M viability concern',            sentiment: 'negative' }],
-  TGEPX: [{ text: 'Expense cap expired Feb 2026',           sentiment: 'negative' }],
-  VADFX: [{ text: 'Process downgraded Jul 2024',            sentiment: 'negative' }],
-  BPLBX: [{ text: 'New lead PM; 227% turnover',             sentiment: 'negative' }],
-  RTRIX: [{ text: 'Founder Royce transitioning out',        sentiment: 'negative' }],
-  DRRYX: [{ text: 'PM overhaul - Morningstar Under Review', sentiment: 'negative' }],
-  MWTSX: [{ text: 'Leadership transition Nov 2025',         sentiment: 'neutral'  }],
-  CFSTX: [{ text: 'AUM $29.4M viability risk',              sentiment: 'negative' }],
-  ADAXX: [{ text: 'Closed to new investors May 2020',       sentiment: 'neutral'  }],
-  BGHIX: [{ text: 'Lead PM departed Jul 2025',              sentiment: 'negative' }],
-  WEGRX: [{ text: 'Fee waiver expires 8/31/2026',           sentiment: 'negative' }],
-  HRAUX: [{ text: '12% cap gain distribution early 2026',   sentiment: 'negative' }],
-};
-
-export const SEED = {
-  PRPFX: { composite: 7.8 },
-  WFPRX: { composite: 6.1 },
-  VFWAX: { composite: 7.2 },
-  QFVRX: { composite: 6.4 },
-  MADFX: { composite: 5.5 },
-  VADFX: { composite: 4.8 },
-  RNWGX: { composite: 6.8 },
-  OIBIX: { composite: 5.2 },
-  RTRIX: { composite: 4.1 },
-  DRRYX: { composite: 3.8 },
-  VWIGX: { composite: 6.5 },
-  TGEPX: { composite: 5.8 },
-  BPLBX: { composite: 5.0 },
-  CFSTX: { composite: 4.5 },
-  MWTSX: { composite: 4.2 },
-  FXAIX: { composite: 4.5 },
-  FDRXX: { composite: 3.5 },
-  ADAXX: { composite: 3.4 },
-  WEGRX: { composite: 3.2 },
-  BGHIX: { composite: 3.5 },
-  HRAUX: { composite: 3.0 },
-  FSPGX: { composite: 3.8 },
-};
-
-export const DEFAULT_WEIGHTS = { mandateScore: 40, momentum: 25, riskAdj: 20, managerQuality: 15 };
+// ---------------------------------------------------------------------------
+// Factor Display Labels
+// ---------------------------------------------------------------------------
 
 export const FACTOR_LABELS = {
-  mandateScore:   { label: 'Macro Fit',   desc: "How well this fund's investment mandate aligns with current macro conditions" },
-  momentum:       { label: 'Market Feel', desc: "Recent price trend (63-day momentum) \u2014 the market's current vote on this fund" },
-  riskAdj:        { label: 'Room to Run', desc: 'Return quality relative to risk (Sharpe ratio)' },
-  managerQuality: { label: 'Foundations', desc: 'Management team quality, fund stability, parent company reputation, and fee structure' },
+  mandateScore:   'Macro Fit',
+  momentum:       'Market Feel',
+  riskAdj:        'Room to Run',
+  managerQuality: 'Foundations',
 };
 
-export const WIZARD_STEPS = {
-  titles: ['', 'Your Investor Profile', 'Your Fund Universe', 'What Matters to You', 'Ready to Go!'],
-  subs: [
-    '',
-    'Tell us your name and \u2014 if your employer has a FundLens code \u2014 enter it to instantly load your 401K fund options.',
-    'Review the funds available in your 401K. You can add or remove tickers at any time.',
-    'These four factors drive how FundLens ranks your funds. Adjust them to reflect what you personally believe matters most.',
-    'FundLens will analyze the world right now and surface the funds built for this moment.',
-  ],
-};
+export const FACTOR_KEYS = ['mandateScore', 'momentum', 'riskAdj', 'managerQuality'];
 
-export const WIZARD_FACTORS = [
-  {
-    key: 'mandateScore', label: 'Macro Fit', emoji: '\u{1F30D}',
-    what: "How well does this fund's strategy match what's happening in the economy right now?",
-    conservative: "Matters somewhat \u2014 you want funds that aren't fighting the macro tide.",
-    aggressive:   "Matters a lot \u2014 you're betting on the macro call being right.",
-  },
-  {
-    key: 'momentum', label: 'Market Feel', emoji: '\u{1F4C8}',
-    what: 'Is this fund already moving in the right direction? Recent 63-day price trend.',
-    conservative: "Matters less \u2014 past movement doesn't guarantee safety.",
-    aggressive:   'Matters a lot \u2014 you want funds the market is already rewarding.',
-  },
-  {
-    key: 'riskAdj', label: 'Room to Run', emoji: '\u2696\uFE0F',
-    what: 'Does this fund deliver returns without wild swings? (Sharpe ratio \u2014 return per unit of risk)',
-    conservative: 'Matters most \u2014 you want steady returns, not a rollercoaster.',
-    aggressive:   "Matters less \u2014 you're willing to accept volatility for bigger gains.",
-  },
-  {
-    key: 'managerQuality', label: 'Foundations', emoji: '\u{1F3DB}\uFE0F',
-    what: "How consistently has this fund's management team executed over time?",
-    conservative: "Matters more \u2014 you want a fund you can trust to do what it says.",
-    aggressive:   "Matters as a floor \u2014 you still don't want a badly run fund.",
-  },
-];
+// ---------------------------------------------------------------------------
+// Tier Classification — Modified Z-Score thresholds
+// ---------------------------------------------------------------------------
 
-// ── World data cache TTL ────────────────────────────────────────────────────
-// 1440 minutes = 24 hours. World data (FRED, Treasury, news) is fetched fresh
-// once per day. FRED series are updated daily or weekly; Treasury rates move
-// intraday but daily granularity is sufficient for mandate scoring.
-export const DEFAULT_WORLD_TTL_MINS = 1440;
-
-export const RSS_FEEDS = [
-  { url: 'https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=10000664', label: 'CNBC Markets'      },
-  { url: 'https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=20910258', label: 'CNBC Economy'      },
-  { url: 'https://feeds.content.dowjones.io/public/rss/mw_topstories',                          label: 'MarketWatch'       },
-  { url: 'https://feeds.content.dowjones.io/public/rss/mw_marketpulse',                         label: 'MarketWatch Pulse' },
-];
-
+/**
+ * Returns { label, color, description } for a given Modified Z-Score.
+ * Special string values 'MONEY_MARKET' and 'LOW_DATA' are also handled.
+ *
+ * @param {number|string} modZ
+ * @returns {{ label: string, color: string, description: string }}
+ */
 export function getTierFromModZ(modZ) {
-  if (modZ >= 2.0)  return 'BREAKAWAY';
-  if (modZ >= 1.2)  return 'STRONG';
-  if (modZ >= 0.3)  return 'SOLID';
-  if (modZ >= -0.5) return 'NEUTRAL';
-  return 'WEAK';
+  if (modZ === 'MONEY_MARKET') {
+    return { label: 'MM',       color: '#6B7280', description: 'Money market fund' };
+  }
+  if (modZ === 'LOW_DATA') {
+    return { label: 'Low Data', color: '#6B7280', description: 'Insufficient data for classification' };
+  }
+
+  const z = Number(modZ);
+
+  if (z >= 2.0) {
+    return { label: 'BREAKAWAY', color: '#d97706', description: 'Statistically exceptional' };
+  }
+  if (z >= 1.2) {
+    return { label: 'STRONG',    color: '#059669', description: 'Meaningfully above average' };
+  }
+  if (z >= 0.3) {
+    return { label: 'SOLID',     color: '#3b82f6', description: 'Above average' };
+  }
+  if (z >= -0.5) {
+    return { label: 'NEUTRAL',   color: '#6b7280', description: 'In line with peers' };
+  }
+  return   { label: 'WEAK',      color: '#ef4444', description: 'Below average' };
 }
 
-// ── News collection constants ───────────────────────────────────────────────
-// MAX_HEADLINES: total headlines stored per world run (RSS + GDELT combined,
-// after deduplication). Increase here as new sources are added — no logic changes.
-export const MAX_HEADLINES = 50;
+// ---------------------------------------------------------------------------
+// Seed Scores — displayed before first pipeline run completes
+// All sub-scores and composite default to 5.0
+// ---------------------------------------------------------------------------
 
-// GDELT_QUERY: the search terms passed to GDELT's artlist endpoint.
-// Kept broad intentionally — world context should give Claude a wide-angle
-// macro view, not a pre-filtered one. Tune here without touching world.js.
-export const GDELT_QUERY = 'finance economy market Federal Reserve inflation';
+const _defaultSeed = () => ({
+  composite:      5.0,
+  mandateScore:   5.0,
+  momentum:       5.0,
+  riskAdj:        5.0,
+  managerQuality: 5.0,
+});
 
-// Single source of truth for the Claude model used across all engine files.
-// Update here when the model changes — do not hardcode in individual files.
-export const CLAUDE_MODEL = 'claude-haiku-4-5-20251001';
+export const SEED_SCORES = Object.fromEntries(
+  DEFAULT_FUNDS.map(({ ticker }) => [ticker, _defaultSeed()])
+);
 
-// ── Expense ratio benchmark vintage ────────────────────────────────────────
-// Year the ICI/Morningstar expense ratio thresholds were sourced from.
-// expenses.js will emit a console.warn in Railway logs if this data is ≥2
-// years old, signalling that a human should refresh the thresholds in
-// EXPENSE_RATIO_THRESHOLDS (also in constants.js).
-export const EXPENSE_BENCHMARKS_VINTAGE = 2024;
+// ---------------------------------------------------------------------------
+// Static Expense Map — fallback when Finnhub is unavailable
+// Values are annual expense ratios (e.g. 0.015 = 0.015%)
+// ---------------------------------------------------------------------------
 
-// ── Expense ratio thresholds by fund type ──────────────────────────────────
-// Source: ICI 2024 Investment Company Fact Book + Morningstar 2024 fee data.
-// Used by expenses.js to derive a ±0.5 net-value modifier for the composite
-// score. Fund type is derived from EDGAR holdings assetCat distribution;
-// the index/active distinction comes from fund name pattern matching.
-// modifier scale: cheap → +0.5 | average → 0 | expensive → -0.5
-export const EXPENSE_RATIO_THRESHOLDS = {
-  indexEquity:  { cheap: 0.10, expensive: 0.30 },
-  activeEquity: { cheap: 0.40, expensive: 0.80 },
-  activeBond:   { cheap: 0.30, expensive: 0.70 },
-  indexBond:    { cheap: 0.15, expensive: 0.40 },
-  moneyMarket:  { cheap: 0.20, expensive: 0.50 },
+export const STATIC_EXPENSE_MAP = {
+  PRPFX: { gross: 0.0082, net: 0.0082 },
+  WFPRX: { gross: 0.0112, net: 0.0112 },
+  VFWAX: { gross: 0.0011, net: 0.0011 },
+  QFVRX: { gross: 0.0124, net: 0.0124 },
+  MADFX: { gross: 0.0090, net: 0.0090 },
+  VADFX: { gross: 0.0020, net: 0.0020 },
+  RNWGX: { gross: 0.0065, net: 0.0065 },
+  OIBIX: { gross: 0.0060, net: 0.0060 },
+  RTRIX: { gross: 0.0116, net: 0.0116 },
+  DRRYX: { gross: 0.0098, net: 0.0098 },
+  VWIGX: { gross: 0.0031, net: 0.0031 },
+  TGEPX: { gross: 0.0085, net: 0.0085 },
+  BPLBX: { gross: 0.0018, net: 0.0018 },
+  CFSTX: { gross: 0.0070, net: 0.0070 },
+  MWTSX: { gross: 0.0038, net: 0.0038 },
+  FXAIX: { gross: 0.0015, net: 0.0015 },
+  FDRXX: { gross: 0.0042, net: 0.0042 },
+  ADAXX: { gross: 0.0052, net: 0.0052 },
+  WEGRX: { gross: 0.0100, net: 0.0100 },
+  BGHIX: { gross: 0.0055, net: 0.0055 },
+  HRAUX: { gross: 0.0090, net: 0.0090 },
+  FSPGX: { gross: 0.0035, net: 0.0035 },
 };
+
+// ---------------------------------------------------------------------------
+// Pipeline Step Labels (10 steps, in order)
+// ---------------------------------------------------------------------------
+
+export const PIPELINE_STEPS = [
+  'Fetching economic data',
+  'Generating investment thesis',
+  'Loading fund holdings',
+  'Fetching price metrics',
+  'Analyzing expense ratios',
+  'Evaluating fund managers',
+  'Scoring mandate alignment',
+  'Computing final scores',
+  'Detecting outliers & computing allocation',
+  'Saving results',
+];
