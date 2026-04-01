@@ -9,29 +9,10 @@
 import useAppStore from '../../store/useAppStore.js';
 import PipelineOverlay   from './PipelineOverlay.jsx';
 import DataQualityBanner from './DataQualityBanner.jsx';
-
-// ─── Tab placeholder components ───────────────────────────────────────────────
-// Replaced in Phase 3 (P3-3, P3-4, P3-5) when the real tab files are uploaded.
-const PortfolioTab = () => (
-  <div style={{ padding: '40px', color: '#6b7280', fontFamily: 'Inter, sans-serif', fontSize: 14 }}>
-    Portfolio tab — coming in P3-3
-  </div>
-);
-
-const ThesisTab = () => (
-  <div style={{ padding: '40px', color: '#6b7280', fontFamily: 'Inter, sans-serif', fontSize: 14 }}>
-    Thesis tab — coming in P3-4
-  </div>
-);
-
-const SettingsTab = () => (
-  <div style={{ padding: '40px', color: '#6b7280', fontFamily: 'Inter, sans-serif', fontSize: 14 }}>
-    Settings tab — coming in P3-5
-  </div>
-);
-
-// Replaced in P3-6 when the real sidebar file is uploaded.
-const FundDetailSidebar = () => null;
+import PortfolioTab      from '../portfolio/PortfolioTab.jsx';
+import ThesisTab         from '../thesis/ThesisTab.jsx';
+import SettingsTab       from '../settings/SettingsTab.jsx';
+import FundDetailSidebar from '../shared/FundDetailSidebar.jsx';
 
 // ─── Source badge ─────────────────────────────────────────────────────────────
 function SourceBadge({ source }) {
