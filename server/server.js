@@ -408,7 +408,8 @@ app.get('/api/gdelt', async (req, res) => {
     mode:       'ArtList',
     format:     'json',
     maxrecords: '20',
-    ...req.query,
+    timespan:   '24h',   // default to last 24h so articles actually exist
+    ...req.query,        // caller overrides (including query string) come after
   });
 
   try {
@@ -417,10 +418,25 @@ app.get('/api/gdelt', async (req, res) => {
 
     if (!upstream.ok) {
       const text = await upstream.text();
+      console.warn(`[gdelt] upstream ${upstream.status}:`, text.slice(0, 120));
       return res.status(upstream.status).json({ error: text });
     }
 
-    const data = await upstream.json();
+    // GDELT occasionally returns an empty body or HTML instead of JSON.
+    // Parse text manually so a bad body never causes a 502.
+    const text = await upstream.text();
+    if (!text || text.trim().length === 0) {
+      return res.json({ articles: [] });
+    }
+
+    let data;
+    try {
+      data = JSON.parse(text);
+    } catch {
+      console.warn('[gdelt] non-JSON response, returning empty articles:', text.slice(0, 80));
+      return res.json({ articles: [] });
+    }
+
     res.json(data);
   } catch (err) {
     console.error('[gdelt]', err.message);
@@ -465,10 +481,12 @@ app.get('/api/edgar/*', async (req, res) => {
 });
 
 // ─── Route 9: EFTS (SEC full-text search) proxy ───────────────────────────────
+// edgar.js calls /api/efts/LATEST/search-index — suffix captures "LATEST/search-index".
+// Base URL must NOT include /LATEST/ to avoid doubling the path segment.
 app.get('/api/efts/*', async (req, res) => {
   const suffix = req.params[0];
   const qs     = new URLSearchParams(req.query).toString();
-  const url    = `https://efts.sec.gov/LATEST/${suffix}${qs ? '?' + qs : ''}`;
+  const url    = `https://efts.sec.gov/${suffix}${qs ? '?' + qs : ''}`;
   await secProxy(res, url);
 });
 
@@ -576,7 +594,7 @@ app.get('/health', async (req, res) => {
     ),
     checkService('gdelt', () =>
       proxyFetch(
-        'https://api.gdeltproject.org/api/v2/doc/doc?query=economy&mode=ArtList&format=json&maxrecords=1'
+        'https://api.gdeltproject.org/api/v2/doc/doc?query=economy&mode=ArtList&format=json&maxrecords=1&timespan=24h'
       )
     ),
     ...(TWELVEDATA_KEY
