@@ -1,12 +1,13 @@
+// src/services/supabase.js
+// Supabase client — AUTH ONLY.
+// Data queries go through the Railway proxy via supaFetch() in api.js.
+
 import { createClient } from '@supabase/supabase-js';
 
-const SUPABASE_URL  = 'https://jbzhordefdqplxjtxfji.supabase.co';
-const SUPABASE_ANON = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImpiemhvcmRlZmRxcGx4anR4ZmppIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzMzMjk0NDEsImV4cCI6MjA4ODkwNTQ0MX0.Zy-5CqLory8qqz1lkXiunfCq_qTckQpEzZZxAX-ip2k';
+const SUPA_URL      = import.meta.env.VITE_SUPA_URL      || '';
+const SUPA_ANON_KEY = import.meta.env.VITE_SUPA_ANON_KEY || '';
 
-export const supabase = createClient(SUPABASE_URL, SUPABASE_ANON, {
-  auth: {
-    autoRefreshToken:   true,
-    persistSession:     true,
-    detectSessionInUrl: true,
-  },
-});
+// Client is created even when env vars are absent so the app
+// can import this module without crashing. Auth calls will fail
+// gracefully when the values are empty.
+export const supabase = createClient(SUPA_URL, SUPA_ANON_KEY);
