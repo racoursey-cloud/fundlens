@@ -1,73 +1,247 @@
+// src/components/auth/LoginPage.jsx
+// Passwordless magic-link login. Supabase handles the redirect callback automatically.
+// App.jsx detects the resulting session via onAuthStateChange.
+
 import { useState } from 'react';
-import { supabase } from '../../services/supabase.js';
+import { supabase } from '../../services/supabase';
 
 export default function LoginPage() {
-  const [mode, setMode]         = useState('login');
-  const [email, setEmail]       = useState('');
-  const [password, setPassword] = useState('');
-  const [name, setName]         = useState('');
-  const [loading, setLoading]   = useState(false);
-  const [error, setError]       = useState('');
-  const [info, setInfo]         = useState('');
+  const [email, setEmail]     = useState('');
+  const [status, setStatus]   = useState('idle'); // idle | loading | success | error
+  const [errorMsg, setErrorMsg] = useState('');
 
-  const handleSubmit = async (e) => {
-    e.preventDefault(); setError(''); setInfo(''); setLoading(true);
-    if (mode === 'login') {
-      const { error: err } = await supabase.auth.signInWithPassword({ email, password });
-      if (err) setError(err.message);
-    } else {
-      if (!name.trim()) { setError('Please enter your name.'); setLoading(false); return; }
-      const { data, error: err } = await supabase.auth.signUp({ email, password });
-      if (err) { setError(err.message); }
-      else if (data?.user) {
-        await supabase.from('profiles').update({ name: name.trim() }).eq('id', data.user.id);
-        if (!data.session) { setInfo('Account created! Check your email to confirm, then log in.'); setMode('login'); }
-      }
+  const handleSubmit = async () => {
+    const trimmed = email.trim();
+
+    // Basic client-side validation
+    if (!trimmed || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmed)) {
+      setErrorMsg('Invalid email address.');
+      setStatus('error');
+      return;
     }
-    setLoading(false);
+
+    setStatus('loading');
+    setErrorMsg('');
+
+    const { error } = await supabase.auth.signInWithOtp({
+      email: trimmed,
+      options: { emailRedirectTo: window.location.origin },
+    });
+
+    if (error) {
+      const msg = error.message?.toLowerCase().includes('rate')
+        ? 'Too many requests — please wait a moment and try again.'
+        : error.message || 'Something went wrong. Please try again.';
+      setErrorMsg(msg);
+      setStatus('error');
+    } else {
+      setStatus('success');
+    }
+  };
+
+  const handleKeyDown = (e) => {
+    if (e.key === 'Enter' && status !== 'loading') handleSubmit();
   };
 
   return (
-    <div style={{ minHeight:'100vh', display:'flex', alignItems:'center', justifyContent:'center', padding:'40px 20px', background:'var(--bg)' }}>
-      <div style={{ width:'100%', maxWidth:'400px' }}>
-        <div style={{ textAlign:'center', marginBottom:'32px' }}>
-          <div className="app-logo" style={{ fontSize:'24px', marginBottom:'6px' }}>Fund<span>Lens</span></div>
-          <p style={{ fontSize:'13px', color:'var(--text3)' }}>401K Intelligence</p>
+    <div
+      style={{
+        minHeight: '100vh',
+        backgroundColor: '#0e0f11',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        fontFamily: "'Inter', sans-serif",
+        padding: '24px',
+      }}
+    >
+      {/* Card */}
+      <div
+        style={{
+          width: '100%',
+          maxWidth: '420px',
+          backgroundColor: '#16181c',
+          border: '1px solid #25282e',
+          borderRadius: '16px',
+          padding: '40px 36px 36px',
+          boxShadow: '0 8px 32px rgba(0,0,0,0.5)',
+        }}
+      >
+        {/* Logo */}
+        <div style={{ textAlign: 'center', marginBottom: '6px' }}>
+          <span
+            style={{
+              fontSize: '24px',
+              fontWeight: 700,
+              color: '#ffffff',
+              letterSpacing: '-0.5px',
+            }}
+          >
+            Fund
+          </span>
+          <span
+            style={{
+              fontSize: '24px',
+              fontWeight: 700,
+              color: '#3b82f6',
+              letterSpacing: '-0.5px',
+            }}
+          >
+            Lens
+          </span>
         </div>
-        <div className="card fade-in" style={{ padding:'32px' }}>
-          <h2 style={{ fontFamily:"'Libre Baskerville',serif", fontSize:'18px', fontWeight:700, marginBottom:'6px' }}>
-            {mode==='login' ? 'Sign in to FundLens' : 'Create your account'}
-          </h2>
-          <p style={{ fontSize:'12px', color:'var(--text3)', marginBottom:'24px' }}>
-            {mode==='login' ? 'Your analysis, your history, your settings — always here.' : 'Set up your profile once. Run analysis anytime.'}
+
+        {/* Tagline */}
+        <p
+          style={{
+            textAlign: 'center',
+            fontSize: '13px',
+            color: '#6b7280',
+            margin: '0 0 24px',
+          }}
+        >
+          401K Intelligence Platform
+        </p>
+
+        {/* Divider */}
+        <div
+          style={{
+            height: '1px',
+            backgroundColor: '#25282e',
+            marginBottom: '28px',
+          }}
+        />
+
+        {/* Form or Success */}
+        {status === 'success' ? (
+          <p
+            style={{
+              textAlign: 'center',
+              fontSize: '14px',
+              color: '#059669',
+              lineHeight: 1.6,
+              margin: 0,
+            }}
+          >
+            Check your email — we sent you a login link.
           </p>
-          {error && <div style={{ background:'var(--red-bg)', border:'1px solid var(--red-bd)', color:'var(--red)', borderRadius:'7px', padding:'10px 12px', fontSize:'12px', marginBottom:'16px' }}>{error}</div>}
-          {info  && <div style={{ background:'var(--green-bg)', border:'1px solid var(--green-bd)', color:'var(--green)', borderRadius:'7px', padding:'10px 12px', fontSize:'12px', marginBottom:'16px' }}>{info}</div>}
-          <form onSubmit={handleSubmit}>
-            {mode==='signup' && (
-              <div style={{ marginBottom:'14px' }}>
-                <label className="label" style={{ display:'block', marginBottom:'5px' }}>Your Name</label>
-                <input type="text" placeholder="First name or full name" value={name} onChange={e=>setName(e.target.value)} required />
-              </div>
+        ) : (
+          <>
+            {/* Email input */}
+            <div style={{ marginBottom: '14px' }}>
+              <input
+                type="email"
+                value={email}
+                onChange={(e) => {
+                  setEmail(e.target.value);
+                  if (status === 'error') { setStatus('idle'); setErrorMsg(''); }
+                }}
+                onKeyDown={handleKeyDown}
+                placeholder="your@email.com"
+                disabled={status === 'loading'}
+                style={{
+                  width: '100%',
+                  boxSizing: 'border-box',
+                  backgroundColor: '#0e0f11',
+                  border: `1px solid ${status === 'error' ? '#ef4444' : '#25282e'}`,
+                  borderRadius: '8px',
+                  color: '#ffffff',
+                  fontSize: '14px',
+                  padding: '11px 14px',
+                  outline: 'none',
+                  transition: 'border-color 0.15s',
+                  fontFamily: "'Inter', sans-serif",
+                }}
+                onFocus={(e) => {
+                  if (status !== 'error') e.target.style.borderColor = '#3b82f6';
+                }}
+                onBlur={(e) => {
+                  if (status !== 'error') e.target.style.borderColor = '#25282e';
+                }}
+              />
+            </div>
+
+            {/* Error message */}
+            {status === 'error' && errorMsg && (
+              <p
+                style={{
+                  fontSize: '12px',
+                  color: '#ef4444',
+                  margin: '0 0 12px',
+                  lineHeight: 1.5,
+                }}
+              >
+                {errorMsg}
+              </p>
             )}
-            <div style={{ marginBottom:'14px' }}>
-              <label className="label" style={{ display:'block', marginBottom:'5px' }}>Email</label>
-              <input type="email" placeholder="you@example.com" value={email} onChange={e=>setEmail(e.target.value)} required autoComplete="email" />
-            </div>
-            <div style={{ marginBottom:'24px' }}>
-              <label className="label" style={{ display:'block', marginBottom:'5px' }}>Password</label>
-              <input type="password" placeholder={mode==='signup' ? 'Minimum 6 characters' : 'Your password'} value={password} onChange={e=>setPassword(e.target.value)} required minLength={6} autoComplete={mode==='login'?'current-password':'new-password'} />
-            </div>
-            <button type="submit" className="btn btn-primary" style={{ width:'100%', justifyContent:'center', padding:'11px' }} disabled={loading}>
-              {loading ? <><span className="spinner" style={{ width:14, height:14, borderWidth:2 }} /> Working...</> : mode==='login' ? 'Sign in' : 'Create account'}
+
+            {/* Submit button */}
+            <button
+              onClick={handleSubmit}
+              disabled={status === 'loading'}
+              style={{
+                width: '100%',
+                backgroundColor: status === 'loading' ? '#2563eb' : '#3b82f6',
+                color: '#ffffff',
+                fontWeight: 600,
+                fontSize: '14px',
+                fontFamily: "'Inter', sans-serif",
+                border: 'none',
+                borderRadius: '8px',
+                padding: '12px',
+                cursor: status === 'loading' ? 'not-allowed' : 'pointer',
+                opacity: status === 'loading' ? 0.8 : 1,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: '8px',
+                transition: 'background-color 0.15s, opacity 0.15s',
+              }}
+              onMouseEnter={(e) => {
+                if (status !== 'loading') e.currentTarget.style.backgroundColor = '#2563eb';
+              }}
+              onMouseLeave={(e) => {
+                if (status !== 'loading') e.currentTarget.style.backgroundColor = '#3b82f6';
+              }}
+            >
+              {status === 'loading' ? (
+                <>
+                  <Spinner />
+                  Sending...
+                </>
+              ) : (
+                'Send Magic Link'
+              )}
             </button>
-          </form>
-          <div style={{ textAlign:'center', marginTop:'20px', fontSize:'12px', color:'var(--text3)' }}>
-            {mode==='login' ? (<>Don't have an account?{' '}<button onClick={()=>{setMode('signup');setError('');setInfo('');}} style={{ background:'none', border:'none', cursor:'pointer', color:'var(--accent)', fontWeight:600 }}>Sign up</button></>) : (<>Already have an account?{' '}<button onClick={()=>{setMode('login');setError('');setInfo('');}} style={{ background:'none', border:'none', cursor:'pointer', color:'var(--accent)', fontWeight:600 }}>Sign in</button></>)}
-          </div>
-        </div>
-        <p style={{ textAlign:'center', fontSize:'11px', color:'var(--text3)', marginTop:'20px' }}>FundLens is a private 401K analysis tool.</p>
+          </>
+        )}
       </div>
     </div>
+  );
+}
+
+// Inline SVG spinner — no icon library needed
+function Spinner() {
+  return (
+    <svg
+      width="16"
+      height="16"
+      viewBox="0 0 16 16"
+      fill="none"
+      style={{ animation: 'fundlens-spin 0.75s linear infinite' }}
+    >
+      <style>{`@keyframes fundlens-spin { to { transform: rotate(360deg); } }`}</style>
+      <circle
+        cx="8" cy="8" r="6"
+        stroke="rgba(255,255,255,0.3)"
+        strokeWidth="2"
+      />
+      <path
+        d="M8 2a6 6 0 0 1 6 6"
+        stroke="#ffffff"
+        strokeWidth="2"
+        strokeLinecap="round"
+      />
+    </svg>
   );
 }
