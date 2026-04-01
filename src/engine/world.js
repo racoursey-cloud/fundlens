@@ -45,13 +45,29 @@ function sourceType(s) {
 // FRED helpers
 // ---------------------------------------------------------------------------
 
+// These series are raw index levels in FRED, not rates or percentages.
+// Requesting units=pc1 converts them to year-over-year % change so Claude
+// receives "2.8" (inflation rate) instead of "327" (CPI index level).
+const FRED_PC1_SERIES = new Set([
+  'CPIAUCSL',   // Consumer Price Index level → YoY %
+  'CPILFESL',   // Core CPI level → YoY %
+  'INDPRO',     // Industrial Production index → YoY %
+  'PCEPI',      // PCE Price Index level → YoY %
+  'PCEPILFE',   // Core PCE level → YoY %
+]);
+
 async function fetchFredObservations(seriesId) {
-  const qs = new URLSearchParams({
+  const params = {
     series_id:         seriesId,
     sort_order:        'desc',
     limit:             '5',
     observation_start: oneYearAgoISO(),
-  }).toString();
+  };
+  // Convert index-level series to year-over-year % change automatically.
+  if (FRED_PC1_SERIES.has(seriesId)) {
+    params.units = 'pc1';
+  }
+  const qs = new URLSearchParams(params).toString();
   return apiFetch(`/api/fred/series/observations?${qs}`);
 }
 
