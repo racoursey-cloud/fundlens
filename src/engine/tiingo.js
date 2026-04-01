@@ -1,161 +1,235 @@
-// FundLens v4 — Tiingo price metrics engine
-// Fetches 63 trading days of adjusted close prices for a fund and computes:
-//   - momentum:  63-day total return (price_today / price_63d_ago) - 1
-//   - sharpe:    annualised Sharpe ratio over the 63-day window
+// src/engine/tiingo.js
+// Fetches price metrics (NAV, momentum, Sharpe/riskAdj) from Tiingo for all
+// fund tickers. Results are cached in Supabase tiingo_cache (1-day TTL).
 //
-// Architecture notes:
-// - 63 trading days ≈ 3 calendar months. Standard intermediate momentum window.
-// - Sharpe uses the daily Fed Funds Rate (DFF from FRED) as the risk-free rate.
-//   Pass riskFreeRateAnnual from worldData.fredData.DFF.value; defaults to 0.
-// - Cache TTL: 1 day (tiingo_cache table). Price metrics update daily.
-// - MONEY_MARKET_FUNDS return a zero-score sentinel — no price fetch needed.
-// - Never throws. Returns null metrics on any failure; scoring.js handles nulls.
+// ⚠️  All Supabase calls route through supaFetch() in cache.js.
+// ⚠️  No localStorage. No direct Supabase calls.
+// ⚠️  200ms delay between live Tiingo fetches (free-tier rate limit).
+// ⚠️  429 handling: serve stale cache if available, else emit 5.0 fallbacks.
 
-import { MONEY_MARKET_FUNDS } from './constants.js';
-import { getTiingoMetrics, setTiingoMetrics } from '../services/cache.js';
-import { fetchTiingo } from '../services/api.js';
+import { getTiingoCache, saveTiingoCache } from '../services/cache.js';
+import { supaFetch }                        from '../services/api.js';
+import { MONEY_MARKET_TICKERS }             from './constants.js';
 
-const MOMENTUM_DAYS   = 63;   // Trading days for momentum + Sharpe window
-const TRADING_DAYS_PA = 252;  // Trading days per year for annualisation
+// ---------------------------------------------------------------------------
+// Internal helpers
+// ---------------------------------------------------------------------------
 
-// ── Math helpers ──────────────────────────────────────────────────────────────
-function mean(arr) {
-  return arr.reduce((a, b) => a + b, 0) / arr.length;
+const DELAY_MS = 200;
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-function stdDev(arr) {
-  const m   = mean(arr);
-  const variance = arr.reduce((sum, x) => sum + (x - m) ** 2, 0) / arr.length;
+function clamp(val, min, max) {
+  return Math.min(Math.max(val, min), max);
+}
+
+/**
+ * Sample standard deviation of an array of numbers.
+ * Returns 0 if fewer than 2 elements.
+ */
+function sampleStdDev(arr) {
+  if (arr.length < 2) return 0;
+  const mean = arr.reduce((a, b) => a + b, 0) / arr.length;
+  const variance = arr.reduce((sum, v) => sum + (v - mean) ** 2, 0) / (arr.length - 1);
   return Math.sqrt(variance);
 }
 
-// ── Compute metrics from price array ─────────────────────────────────────────
-// prices: array of adjusted close prices, oldest first, length >= 2
-// riskFreeRateAnnual: annualised risk-free rate as decimal (e.g. 0.0533 for 5.33%)
-function computeMetrics(prices, riskFreeRateAnnual = 0) {
-  if (!prices || prices.length < 2) return null;
+/**
+ * Returns a YYYY-MM-DD date string for `daysBack` days in the past.
+ */
+function isoDateAgo(daysBack) {
+  const d = new Date();
+  d.setDate(d.getDate() - daysBack);
+  return d.toISOString().split('T')[0];
+}
 
-  // Momentum: total return over the full window
-  const momentum = (prices[prices.length - 1] / prices[0]) - 1;
+/**
+ * Computes { nav, momentum, sharpe, riskAdj } from a Tiingo prices array.
+ *
+ * Tiingo returns rows oldest-first when queried with startDate/endDate.
+ * Each row may have adjClose or close; adjClose is preferred.
+ *
+ * momentum scaling:
+ *   neutral (0%) → 5.0
+ *   +5% over 63 days → ~7.5  (multiplier 50)
+ *   -5% over 63 days → ~2.5
+ *   clamped 1–10
+ *
+ * riskAdj:
+ *   sharpe_raw = (avg_daily_return / std_dev_daily) * sqrt(252)
+ *   riskAdj = clamp(5 + sharpe_raw * 2, 1, 10)
+ *
+ * Returns null if fewer than 2 usable close prices exist.
+ */
+function computeMetrics(prices) {
+  if (!Array.isArray(prices) || prices.length < 2) return null;
+
+  const closes = prices
+    .map(p => (p.adjClose != null ? p.adjClose : p.close))
+    .filter(v => v != null && v > 0);
+
+  if (closes.length < 2) return null;
+
+  const oldest = closes[0];
+  const latest = closes[closes.length - 1];
+
+  const nav = latest;
+
+  // Momentum score
+  const momentumPct = (latest - oldest) / oldest;
+  const momentum = clamp(5 + momentumPct * 50, 1, 10);
 
   // Daily returns
   const dailyReturns = [];
-  for (let i = 1; i < prices.length; i++) {
-    dailyReturns.push((prices[i] / prices[i - 1]) - 1);
+  for (let i = 1; i < closes.length; i++) {
+    dailyReturns.push((closes[i] - closes[i - 1]) / closes[i - 1]);
   }
 
-  // Convert annual risk-free rate to daily equivalent
-  const riskFreeDaily = riskFreeRateAnnual / TRADING_DAYS_PA;
-
-  // Excess daily returns
-  const excessReturns = dailyReturns.map(r => r - riskFreeDaily);
-
-  const meanExcess = mean(excessReturns);
-  const stdExcess  = stdDev(excessReturns);
-
-  // Annualised Sharpe — guard against zero std dev (flat price series)
-  const sharpe = stdExcess > 0
-    ? (meanExcess / stdExcess) * Math.sqrt(TRADING_DAYS_PA)
-    : 0;
+  const avgReturn = dailyReturns.reduce((a, b) => a + b, 0) / dailyReturns.length;
+  const std = sampleStdDev(dailyReturns);
+  const sharpeRaw = std > 0 ? (avgReturn / std) * Math.sqrt(252) : 0;
+  const riskAdj = clamp(5 + sharpeRaw * 2, 1, 10);
 
   return {
-    momentum: Math.round(momentum * 10000) / 10000,  // 4 decimal places
-    sharpe:   Math.round(sharpe   * 1000)  / 1000,   // 3 decimal places
+    nav,
+    momentum: Number(momentum.toFixed(4)),
+    sharpe:   Number(sharpeRaw.toFixed(4)),
+    riskAdj:  Number(riskAdj.toFixed(4)),
   };
 }
 
-// ── Tiingo price fetch ────────────────────────────────────────────────────────
-// Fetches MOMENTUM_DAYS + 5 calendar days of daily adjusted prices to ensure
-// we get at least MOMENTUM_DAYS trading day observations even around holidays.
-async function fetchPrices(ticker) {
-  // Request ~95 calendar days to guarantee 63+ trading day observations
-  const endDate   = new Date();
-  const startDate = new Date();
-  startDate.setDate(endDate.getDate() - 95);
-
-  const fmt  = d => d.toISOString().split('T')[0];
-
+/**
+ * Attempts to read stale (possibly expired) tiingo_cache rows directly.
+ * Called only after a 429 response, so we want anything we have, regardless
+ * of age. Returns { nav, momentum, sharpe, riskAdj } or null.
+ */
+async function getStaleCache(ticker) {
   try {
-    const data = await fetchTiingo(
-      `/tiingo/daily/${encodeURIComponent(ticker)}/prices`,
-      {
-        startDate:   fmt(startDate),
-        endDate:     fmt(endDate),
-        resampleFreq: 'daily',
-        sort:         'date',
-      }
+    const rows = await supaFetch(
+      `tiingo_cache?ticker=eq.${encodeURIComponent(ticker.toUpperCase())}`
     );
-
-    if (!Array.isArray(data) || data.length < 2) {
-      console.warn(`[tiingo] Insufficient price data for ${ticker} (${data?.length ?? 0} rows)`);
-      return null;
-    }
-
-    // Extract close prices, oldest first
-    // Tiingo mutual fund endpoint returns { date, close } (NAV per share).
-    // adjClose is only present on stock/ETF endpoints; fallback to close handles both.
-    const prices = data
-      .map(d => d.adjClose ?? d.close)
-      .filter(p => p != null && p > 0);
-
-    if (prices.length < 2) return null;
-
-    // Trim to exactly MOMENTUM_DAYS + 1 points (need +1 for MOMENTUM_DAYS returns)
-    return prices.slice(-( MOMENTUM_DAYS + 1));
-  } catch (err) {
-    console.warn(`[tiingo] Price fetch failed for ${ticker}:`, err.message);
+    if (!Array.isArray(rows) || rows.length === 0) return null;
+    const row = rows[0];
+    return {
+      nav:      row.nav      ?? null,
+      momentum: row.momentum ?? 5.0,
+      sharpe:   row.sharpe   ?? 0,
+      riskAdj:  row.risk_adj ?? 5.0,
+    };
+  } catch {
     return null;
   }
 }
 
-// ── Public entry point ────────────────────────────────────────────────────────
-// Returns:
-// {
-//   momentum:  number | null,   ← 63-day total return, e.g. 0.0842 = +8.42%
-//   sharpe:    number | null,   ← annualised Sharpe ratio
-//   fromCache: boolean,
-// }
-//
-// Money market funds return { momentum: 0, sharpe: 0, fromCache: false }.
-// Returns { momentum: null, sharpe: null, fromCache: false } on any failure.
-export async function fetchTiingoMetrics(ticker, riskFreeRateAnnual = 0) {
-  // Money market funds: stable NAV, no meaningful momentum or Sharpe
-  if (MONEY_MARKET_FUNDS.has(ticker)) {
-    return { momentum: 0, sharpe: 0, fromCache: false };
+// ---------------------------------------------------------------------------
+// Public export
+// ---------------------------------------------------------------------------
+
+/**
+ * Fetches price metrics for all given tickers.
+ *
+ * @param {string[]}  tickers    - Array of fund ticker strings.
+ * @param {Function}  onProgress - Optional callback(completedCount, totalCount).
+ *                                 Called after every 3rd ticker completes.
+ * @returns {Promise<Object>}    - { TICKER: { nav, momentum, sharpe, riskAdj } }
+ */
+export async function fetchTiingoMetrics(tickers, onProgress) {
+  const results = {};
+  let completed = 0;
+
+  // ── Batch cache check (single round-trip) ────────────────────────────────
+  let freshCache = {};
+  try {
+    freshCache = await getTiingoCache(tickers);
+  } catch (err) {
+    console.warn('[tiingo] cache read error:', err.message);
   }
 
-  // Check Supabase cache (1-day TTL enforced by getTiingoMetrics)
-  try {
-    const cached = await getTiingoMetrics(ticker);
-    if (cached) {
-      return {
-        momentum:  cached.momentum  ?? null,
-        sharpe:    cached.sharpe    ?? null,
-        fromCache: true,
-      };
+  // ── Per-ticker loop ───────────────────────────────────────────────────────
+  for (let i = 0; i < tickers.length; i++) {
+    const ticker = tickers[i];
+
+    // Money market funds — fixed fallback, no scoring needed
+    if (MONEY_MARKET_TICKERS.has(ticker)) {
+      results[ticker] = { nav: null, momentum: 5.0, sharpe: 0, riskAdj: 5.0 };
+      completed++;
+      if (completed % 3 === 0 && onProgress) onProgress(completed, tickers.length);
+      continue;
     }
-  } catch (err) {
-    console.warn(`[tiingo] Cache read failed for ${ticker}:`, err.message);
+
+    // Fresh cache hit
+    if (freshCache[ticker]) {
+      results[ticker] = freshCache[ticker];
+      completed++;
+      if (completed % 3 === 0 && onProgress) onProgress(completed, tickers.length);
+      continue;
+    }
+
+    // ── Live Tiingo fetch ─────────────────────────────────────────────────
+    const startDate = isoDateAgo(63);
+    const endDate   = isoDateAgo(0);
+    const url = `/api/tiingo/tiingo/daily/${encodeURIComponent(ticker)}/prices?startDate=${startDate}&endDate=${endDate}`;
+
+    let metrics = null;
+
+    try {
+      const res = await fetch(url);
+
+      if (res.status === 429) {
+        // Rate-limited — try stale cache before giving up
+        console.warn(`[tiingo] 429 for ${ticker} — attempting stale cache`);
+        const stale = await getStaleCache(ticker);
+        if (stale) {
+          console.warn(`[tiingo] ${ticker} using stale cache due to 429`);
+          metrics = stale;
+        } else {
+          console.warn(`[tiingo] ${ticker} no stale cache — using fallback 5.0`);
+        }
+      } else if (res.ok) {
+        const prices = await res.json();
+        metrics = computeMetrics(prices);
+
+        if (!metrics) {
+          console.warn(`[tiingo] ${ticker} insufficient price data — using fallback 5.0`);
+        }
+      } else {
+        console.warn(`[tiingo] ${ticker} HTTP ${res.status} — using fallback 5.0`);
+      }
+    } catch (err) {
+      console.warn(`[tiingo] ${ticker} fetch error:`, err.message);
+    }
+
+    // Persist fresh metrics to cache; skip on stale passthrough (already stored)
+    if (metrics && metrics !== null) {
+      results[ticker] = metrics;
+      // Only write to cache if this came from a live fetch (nav is numeric)
+      if (metrics.nav != null) {
+        try {
+          await saveTiingoCache(ticker, metrics);
+        } catch (cacheErr) {
+          console.warn(`[tiingo] ${ticker} cache save error:`, cacheErr.message);
+        }
+      }
+    } else {
+      // Emit 5.0 fallback — pipeline.js will set dataQuality flag
+      results[ticker] = { nav: null, momentum: 5.0, sharpe: 0, riskAdj: 5.0 };
+    }
+
+    completed++;
+    if (completed % 3 === 0 && onProgress) onProgress(completed, tickers.length);
+
+    // 200ms spacing — Tiingo free tier
+    if (i < tickers.length - 1) {
+      await sleep(DELAY_MS);
+    }
   }
 
-  // Fetch prices and compute
-  const prices  = await fetchPrices(ticker);
-  const metrics = computeMetrics(prices, riskFreeRateAnnual);
-
-  if (!metrics) {
-    return { momentum: null, sharpe: null, fromCache: false };
+  // Final progress tick if last batch didn't land on a multiple of 3
+  if (onProgress && completed > 0 && completed % 3 !== 0) {
+    onProgress(completed, tickers.length);
   }
 
-  // Persist to Supabase
-  try {
-    await setTiingoMetrics(ticker, {
-      momentum: metrics.momentum,
-      sharpe:   metrics.sharpe,
-    });
-  } catch (err) {
-    console.warn(`[tiingo] Cache write failed for ${ticker}:`, err.message);
-    // Non-fatal
-  }
-
-  return { ...metrics, fromCache: false };
+  return results;
 }
