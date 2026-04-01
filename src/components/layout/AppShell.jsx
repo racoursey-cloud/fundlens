@@ -1,124 +1,334 @@
-import { useMemo } from 'react';
-import { useAppStore } from '../../store/useAppStore.js';
-import { supabase } from '../../services/supabase.js';
-import { SEED, getTierFromModZ } from '../../engine/constants.js';
-import PipelineOverlay from '../shared/PipelineOverlay.jsx';
-import DataQualityBanner from '../shared/DataQualityBanner.jsx';
-import ThesisTab from '../thesis/ThesisTab.jsx';
-import PortfolioTab from '../PortfolioTab.jsx';
+// =============================================================================
+// FundLens v5 — src/components/layout/AppShell.jsx
+// Main application shell rendered after login + wizard.
+// Owns the sticky header, three-tab bar, content area, and overlay layer.
+// All state is read from useAppStore — no local state except what is
+// purely cosmetic (e.g. hover effects handled via CSS / inline style hacks).
+// =============================================================================
 
+import useAppStore from '../../store/useAppStore.js';
+import PipelineOverlay   from './PipelineOverlay.jsx';
+import DataQualityBanner from './DataQualityBanner.jsx';
+
+// ─── Tab placeholder components ───────────────────────────────────────────────
+// Replaced in Phase 3 (P3-3, P3-4, P3-5) when the real tab files are uploaded.
+const PortfolioTab = () => (
+  <div style={{ padding: '40px', color: '#6b7280', fontFamily: 'Inter, sans-serif', fontSize: 14 }}>
+    Portfolio tab — coming in P3-3
+  </div>
+);
+
+const ThesisTab = () => (
+  <div style={{ padding: '40px', color: '#6b7280', fontFamily: 'Inter, sans-serif', fontSize: 14 }}>
+    Thesis tab — coming in P3-4
+  </div>
+);
+
+const SettingsTab = () => (
+  <div style={{ padding: '40px', color: '#6b7280', fontFamily: 'Inter, sans-serif', fontSize: 14 }}>
+    Settings tab — coming in P3-5
+  </div>
+);
+
+// Replaced in P3-6 when the real sidebar file is uploaded.
+const FundDetailSidebar = () => null;
+
+// ─── Source badge ─────────────────────────────────────────────────────────────
+function SourceBadge({ source }) {
+  if (source === 'live') {
+    return (
+      <span style={{
+        display:        'inline-flex',
+        alignItems:     'center',
+        gap:            5,
+        padding:        '3px 10px',
+        borderRadius:   20,
+        fontSize:       11,
+        fontWeight:     700,
+        letterSpacing:  '0.08em',
+        textTransform:  'uppercase',
+        fontFamily:     'Inter, sans-serif',
+        background:     'rgba(5, 150, 105, 0.15)',
+        color:          '#10b981',
+        border:         '1px solid rgba(5, 150, 105, 0.35)',
+      }}>
+        <span style={{
+          width: 6, height: 6, borderRadius: '50%',
+          background: '#10b981', display: 'inline-block',
+        }} />
+        LIVE
+      </span>
+    );
+  }
+
+  if (source === 'loading') {
+    return (
+      <span style={{
+        display:        'inline-flex',
+        alignItems:     'center',
+        gap:            6,
+        padding:        '3px 10px',
+        borderRadius:   20,
+        fontSize:       11,
+        fontWeight:     700,
+        letterSpacing:  '0.08em',
+        textTransform:  'uppercase',
+        fontFamily:     'Inter, sans-serif',
+        background:     'rgba(59, 130, 246, 0.15)',
+        color:          '#3b82f6',
+        border:         '1px solid rgba(59, 130, 246, 0.35)',
+      }}>
+        <span style={{
+          width:          12,
+          height:         12,
+          border:         '2px solid rgba(59,130,246,0.35)',
+          borderTopColor: '#3b82f6',
+          borderRadius:   '50%',
+          display:        'inline-block',
+          animation:      'fl-spin 0.75s linear infinite',
+          flexShrink:     0,
+        }} />
+        ANALYZING…
+      </span>
+    );
+  }
+
+  // 'seed' (default)
+  return (
+    <span style={{
+      display:        'inline-flex',
+      alignItems:     'center',
+      gap:            5,
+      padding:        '3px 10px',
+      borderRadius:   20,
+      fontSize:       11,
+      fontWeight:     700,
+      letterSpacing:  '0.08em',
+      textTransform:  'uppercase',
+      fontFamily:     'Inter, sans-serif',
+      background:     'rgba(107, 114, 128, 0.15)',
+      color:          '#9ca3af',
+      border:         '1px solid rgba(107, 114, 128, 0.30)',
+    }}>
+      SEED DATA
+    </span>
+  );
+}
+
+// ─── Tab definitions ──────────────────────────────────────────────────────────
 const TABS = [
-  { id:'rank', label:'Rankings' }, { id:'thesis', label:'Investment Case' },
-  { id:'portfolio', label:'Portfolio' }, { id:'holdings', label:'Holdings' },
-  { id:'matrix', label:'Matrix' }, { id:'history', label:'History' },
-  { id:'settings', label:'Settings' },
+  { key: 'portfolio', label: 'Portfolio' },
+  { key: 'thesis',    label: 'Thesis'    },
+  { key: 'settings',  label: 'Settings'  },
 ];
 
-export default function AppShell({ userFunds, profile }) {
-  const activeTab   = useAppStore(s => s.activeTab);
-  const setTab      = useAppStore(s => s.setTab);
-  const source      = useAppStore(s => s.source);
-  const loading     = useAppStore(s => s.loading);
-  const lastRun     = useAppStore(s => s.lastRun);
-  const runPipeline = useAppStore(s => s.runPipeline);
-  const funds       = useAppStore(s => s.funds);
+// ─── AppShell ─────────────────────────────────────────────────────────────────
+export default function AppShell() {
+  const {
+    profile,
+    user,
+    source,
+    isRunning,
+    activeTab,
+    dataQuality,
+    setActiveTab,
+    runPipelineAction,
+  } = useAppStore();
 
-  const seedFunds = useMemo(() => userFunds.map(f => ({
-    ...f, composite: SEED[f.ticker]?.composite ?? 5.0, tier: getTierFromModZ(0), modZ: 0,
-  })).sort((a,b) => b.composite - a.composite), [userFunds]);
-
-  // Use live-scored funds when available, fall back to seed data
-  const displayFunds = source === 'live' && funds?.length ? funds : seedFunds;
+  // Display name: prefer profile name, fall back to email, then 'User'
+  const displayName =
+    profile?.name?.trim() ||
+    user?.email?.split('@')[0] ||
+    'User';
 
   return (
-    <div style={{ minHeight:'100vh', background:'var(--bg)' }}>
-      <PipelineOverlay />
-      <header className="app-header">
-        <div style={{ display:'flex', alignItems:'center', gap:'16px' }}>
-          <div className="app-logo">Fund<span>Lens</span></div>
-          {source==='live' && <span className="src-live">LIVE</span>}
-          {source==='seed' && <span className="src-seed">SEED DATA</span>}
-          {loading && <span className="src-partial">RUNNING...</span>}
+    <div style={{
+      minHeight:   '100vh',
+      background:  '#0e0f11',
+      display:     'flex',
+      flexDirection: 'column',
+      fontFamily:  'Inter, sans-serif',
+    }}>
+
+      {/* ── Keyframe injection ─────────────────────────────────────────────── */}
+      <style>{`
+        @keyframes fl-spin {
+          to { transform: rotate(360deg); }
+        }
+        .fl-tab-btn {
+          background: none;
+          border: none;
+          cursor: pointer;
+          outline: none;
+        }
+        .fl-tab-btn:focus-visible {
+          outline: 2px solid #3b82f6;
+          outline-offset: -2px;
+          border-radius: 2px;
+        }
+        .fl-run-btn:hover:not(:disabled) {
+          background: #2563eb !important;
+        }
+        .fl-run-btn:disabled {
+          opacity: 0.6;
+          cursor: not-allowed;
+        }
+      `}</style>
+
+      {/* ═══════════════════════════════════════════════════════════════════════
+          HEADER
+      ══════════════════════════════════════════════════════════════════════════ */}
+      <header style={{
+        position:      'sticky',
+        top:           0,
+        zIndex:        100,
+        height:        56,
+        background:    '#16181c',
+        borderBottom:  '1px solid #25282e',
+        display:       'flex',
+        alignItems:    'center',
+        padding:       '0 20px',
+        gap:           16,
+        flexShrink:    0,
+      }}>
+
+        {/* Logo */}
+        <div style={{
+          fontSize:   18,
+          fontWeight: 700,
+          letterSpacing: '-0.01em',
+          flexShrink: 0,
+          userSelect: 'none',
+        }}>
+          <span style={{ color: '#f9fafb' }}>Fund</span>
+          <span style={{ color: '#3b82f6' }}>Lens</span>
         </div>
-        <div style={{ display:'flex', alignItems:'center', gap:'10px' }}>
-          {lastRun && <span style={{ fontSize:'11px', color:'var(--text3)' }}>Last run: {new Date(lastRun).toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit'})}</span>}
-          {profile?.name && <span style={{ fontSize:'12px', color:'var(--text2)', fontWeight:600 }}>{profile.name}</span>}
-          <button className="btn btn-primary" disabled={loading} onClick={runPipeline}>
-            {loading ? <><span className="spinner" style={{ width:14, height:14, borderWidth:2 }} /> Analyzing...</> : '\u25B6 Run Analysis'}
-          </button>
-          <button className="btn btn-ghost btn-sm" onClick={() => supabase.auth.signOut()}>Sign out</button>
+
+        {/* Source badge — center-left */}
+        <div style={{ flexShrink: 0 }}>
+          <SourceBadge source={source} />
         </div>
+
+        {/* Spacer */}
+        <div style={{ flex: 1 }} />
+
+        {/* Run Analysis button */}
+        <button
+          className="fl-run-btn"
+          disabled={isRunning}
+          onClick={() => runPipelineAction()}
+          style={{
+            display:       'inline-flex',
+            alignItems:    'center',
+            gap:           7,
+            padding:       '0 18px',
+            height:        34,
+            background:    '#3b82f6',
+            color:         '#fff',
+            fontFamily:    'Inter, sans-serif',
+            fontSize:      13,
+            fontWeight:    600,
+            border:        'none',
+            borderRadius:  8,
+            cursor:        'pointer',
+            transition:    'background 0.15s',
+            flexShrink:    0,
+            letterSpacing: '0.01em',
+          }}
+        >
+          {isRunning && (
+            <span style={{
+              width:          13,
+              height:         13,
+              border:         '2px solid rgba(255,255,255,0.35)',
+              borderTopColor: '#fff',
+              borderRadius:   '50%',
+              display:        'inline-block',
+              animation:      'fl-spin 0.75s linear infinite',
+              flexShrink:     0,
+            }} />
+          )}
+          {isRunning ? 'Analyzing…' : 'Run Analysis'}
+        </button>
+
+        {/* User identity */}
+        <div style={{
+          fontSize:   12,
+          color:      '#6b7280',
+          fontFamily: 'Inter, sans-serif',
+          flexShrink: 0,
+          maxWidth:   160,
+          overflow:   'hidden',
+          textOverflow: 'ellipsis',
+          whiteSpace: 'nowrap',
+        }}>
+          {displayName}
+        </div>
+
       </header>
-      <div className="tabs">
-        {TABS.map(t => <button key={t.id} data-label={t.label} className={`tab${activeTab===t.id?' on':''}`} onClick={() => setTab(t.id)}>{t.label}</button>)}
+
+      {/* ═══════════════════════════════════════════════════════════════════════
+          TAB BAR
+      ══════════════════════════════════════════════════════════════════════════ */}
+      <div style={{
+        background:   '#0e0f11',
+        borderBottom: '1px solid #25282e',
+        display:      'flex',
+        gap:          0,
+        padding:      '0 20px',
+        flexShrink:   0,
+      }}>
+        {TABS.map(({ key, label }) => {
+          const isActive = activeTab === key;
+          return (
+            <button
+              key={key}
+              className="fl-tab-btn"
+              onClick={() => setActiveTab(key)}
+              style={{
+                padding:        '0 16px',
+                height:         40,
+                fontSize:       12,
+                fontWeight:     600,
+                textTransform:  'uppercase',
+                letterSpacing:  '0.08em',
+                fontFamily:     'Inter, sans-serif',
+                color:          isActive ? '#f9fafb' : '#6b7280',
+                borderBottom:   isActive ? '2px solid #3b82f6' : '2px solid transparent',
+                marginBottom:   -1,   // sit on top of container border
+                transition:     'color 0.15s',
+              }}
+            >
+              {label}
+            </button>
+          );
+        })}
       </div>
-      <main style={{ padding:'24px', maxWidth:'1200px', margin:'0 auto' }}>
-        <DataQualityBanner />
-        {activeTab==='rank' && <RankingsPlaceholder funds={displayFunds} source={source} />}
-        {activeTab==='thesis' && <ThesisTab />}
-        {activeTab==='portfolio' && <PortfolioTab />}
-        {activeTab==='holdings' && <Placeholder icon={'\uD83D\uDCC2'} title="Fund Holdings" msg="Run Analysis to load holdings from SEC EDGAR." />}
-        {activeTab==='matrix' && <Placeholder icon={'\u26A1'} title="Factor Matrix" msg="Run Analysis to see all 4 factors side by side." />}
-        {activeTab==='history' && <Placeholder icon={'\uD83D\uDCCA'} title="Run History" msg="Your past analysis runs will appear here." />}
-        {activeTab==='settings' && <SettingsPlaceholder profile={profile} userFunds={userFunds} />}
+
+      {/* ═══════════════════════════════════════════════════════════════════════
+          DATA QUALITY BANNER (amber, below tabs)
+      ══════════════════════════════════════════════════════════════════════════ */}
+      <DataQualityBanner />
+
+      {/* ═══════════════════════════════════════════════════════════════════════
+          CONTENT AREA
+      ══════════════════════════════════════════════════════════════════════════ */}
+      <main style={{
+        flex:       1,
+        overflowY:  'auto',
+        background: '#0e0f11',
+      }}>
+        {activeTab === 'portfolio' && <PortfolioTab />}
+        {activeTab === 'thesis'    && <ThesisTab />}
+        {activeTab === 'settings'  && <SettingsTab />}
       </main>
-    </div>
-  );
-}
 
-function RankingsPlaceholder({ funds, source }) {
-  if (!funds.length) return <Placeholder icon={'\uD83D\uDCCB'} title="Rankings" msg="No funds yet. Go to Settings to add funds." />;
-  return (
-    <div className="card fade-in">
-      <div className="card-header">
-        <div><span style={{ fontFamily:"'Libre Baskerville',serif", fontWeight:700, fontSize:'15px' }}>Fund Rankings</span>{source==='seed' && <span className="note" style={{ marginLeft:'10px' }}>Showing seed scores — click Run Analysis for live scoring</span>}</div>
-        <span className="note">{funds.length} funds</span>
-      </div>
-      <div style={{ overflowX:'auto' }}>
-        <table className="data-table">
-          <thead><tr><th>#</th><th>Fund</th><th>Ticker</th><th style={{ textAlign:'right' }}>Composite</th><th>Tier</th></tr></thead>
-          <tbody>
-            {funds.map((f,i) => (
-              <tr key={f.ticker}>
-                <td style={{ color:'var(--text3)', fontFamily:"'JetBrains Mono',monospace", fontSize:'11px' }}>{i+1}</td>
-                <td style={{ fontWeight:600, maxWidth:'260px' }}><div style={{ overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{f.name}</div></td>
-                <td style={{ fontFamily:"'JetBrains Mono',monospace", fontSize:'12px', color:'var(--text2)' }}>{f.ticker}</td>
-                <td style={{ textAlign:'right' }}><span className="score-md">{f.composite.toFixed(1)}</span></td>
-                <td><span className="badge" style={{ background:'var(--surface2)', color:'var(--text3)', border:'1px solid var(--border)', fontSize:'10px' }}>{source === 'live' ? (f.tier || 'SCORED') : 'SEED'}</span></td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-    </div>
-  );
-}
+      {/* ═══════════════════════════════════════════════════════════════════════
+          OVERLAYS — always in the tree, visibility controlled by store state
+      ══════════════════════════════════════════════════════════════════════════ */}
+      <PipelineOverlay />
+      <FundDetailSidebar />
 
-function Placeholder({ icon, title, msg }) {
-  return (
-    <div style={{ textAlign:'center', padding:'60px 20px' }}>
-      <div style={{ fontSize:'40px', marginBottom:'14px' }}>{icon}</div>
-      <h2 style={{ fontFamily:"'Libre Baskerville',serif", fontSize:'18px', marginBottom:'8px' }}>{title}</h2>
-      <p style={{ fontSize:'13px', color:'var(--text3)', maxWidth:'360px', margin:'0 auto' }}>{msg}</p>
-    </div>
-  );
-}
-
-function SettingsPlaceholder({ profile, userFunds }) {
-  return (
-    <div style={{ maxWidth:'560px' }}>
-      <div className="card">
-        <div className="card-header"><span style={{ fontFamily:"'Libre Baskerville',serif", fontWeight:700 }}>Your Profile</span></div>
-        <div className="card-body" style={{ fontSize:'13px' }}>
-          {[['Name',profile?.name||'\u2014'],['Company',profile?.company_name||'\u2014'],['Funds',`${userFunds.length} fund${userFunds.length!==1?'s':''} in universe`]].map(([label,value])=>(
-            <div key={label} style={{ display:'flex', justifyContent:'space-between', padding:'8px 0', borderBottom:'1px solid var(--bg)' }}>
-              <span style={{ color:'var(--text3)', fontWeight:600 }}>{label}</span>
-              <span style={{ fontWeight:600 }}>{value}</span>
-            </div>
-          ))}
-          <p className="note" style={{ marginTop:'16px' }}>Full settings coming in Phase 4.</p>
-        </div>
-      </div>
     </div>
   );
 }
