@@ -2,6 +2,8 @@
 // Generic API helpers used by all engine and UI files.
 // All Supabase data queries route through /api/supabase (Railway proxy).
 // All Claude calls route through /api/claude (Railway proxy injects the key).
+// All external data fetches (FRED, Treasury, GDELT, RSS) route through
+// their respective Railway proxy endpoints — never hit external APIs directly.
 // No direct Supabase data calls. No localStorage.
 
 // ---------------------------------------------------------------------------
@@ -117,4 +119,67 @@ export async function supaDelete(table, query) {
   return supaFetch(`${table}?${query}`, {
     method: 'DELETE',
   });
+}
+
+// ---------------------------------------------------------------------------
+// fetchFredSeries
+// ---------------------------------------------------------------------------
+// Fetch a single FRED economic series via the Railway proxy.
+// seriesId: e.g. "UNRATE", "CPIAUCSL", "FEDFUNDS"
+// Returns: { observations: [{ date, value }, ...] }
+// Observations arrive sorted descending (most recent first).
+// world.js calls this sequentially — FRED rate-limits concurrent requests.
+
+export async function fetchFredSeries(seriesId) {
+  return apiFetch(`/api/fred/${encodeURIComponent(seriesId)}`);
+}
+
+// ---------------------------------------------------------------------------
+// fetchTreasury
+// ---------------------------------------------------------------------------
+// Fetch the current Treasury yield curve via the Railway proxy.
+// Returns: { date, y1, y2, y5, y10, y30 }
+// world.js uses the values to compute four yield spreads (shortEnd, belly,
+// classic, longEnd) which are passed as raw numbers into mandate.js scoring.
+
+export async function fetchTreasury() {
+  return apiFetch('/api/treasury');
+}
+
+// ---------------------------------------------------------------------------
+// fetchGdelt
+// ---------------------------------------------------------------------------
+// Fetch financial news articles from GDELT via the Railway proxy.
+// params: { query, mode, maxrecords, format }
+//   query:      GDELT_QUERY string from constants.js
+//   mode:       'artlist' (article list)
+//   maxrecords: number of articles to request
+//   format:     'json'
+// Returns: { articles: [{ title, url, seendate, ... }, ...] }
+
+export async function fetchGdelt(params = {}) {
+  const qs = new URLSearchParams(
+    Object.entries(params).map(([k, v]) => [k, String(v)])
+  ).toString();
+  const path = qs ? `/api/gdelt?${qs}` : '/api/gdelt';
+  return apiFetch(path);
+}
+
+// ---------------------------------------------------------------------------
+// fetchRSS
+// ---------------------------------------------------------------------------
+// Fetch a raw RSS/Atom feed via the Railway proxy and return the XML text.
+// The proxy avoids CORS restrictions on external RSS endpoints.
+// Returns: raw XML string — NOT JSON. world.js parses it with DOMParser.
+// apiFetch cannot be used here because RSS responses are text/xml, not JSON.
+
+export async function fetchRSS(feedUrl) {
+  const path = `/api/rss?url=${encodeURIComponent(feedUrl)}`;
+  const res  = await fetch(path);
+
+  if (!res.ok) {
+    throw new Error(`fetchRSS ${res.status} — ${path}`);
+  }
+
+  return res.text();
 }
