@@ -1,22 +1,21 @@
 // =============================================================================
-// FundLens v5 — src/store/useAppStore.js
+// FundLens v5.1 — src/store/useAppStore.js
 // Central Zustand state store. All components read from here; all mutations
 // go through actions defined here. No component should call pipeline, cache,
 // or supaFetch directly.
 //
 // ⚠️  SEQUENTIAL CLAUDE CALLS — MANDATORY — DO NOT CHANGE
-// runPipeline() internally calls mandate.js and manager.js which use
-// sequential for-loops with 1.2s delays. Never wrap runPipeline in
+// runPipeline() internally calls thesis.js, classify.js, and letter.js which
+// use sequential Claude calls with 1.2s delays. Never wrap runPipeline in
 // Promise.all() or introduce concurrency around Claude calls.
 // =============================================================================
 
 import { create } from 'zustand';
 
-import { runPipeline }                  from '../engine/pipeline.js';
-import { calcCompositeScores }          from '../engine/scoring.js';
-import { computeOutliersAndAllocation } from '../engine/outlier.js';
-import * as cache                       from '../services/cache.js';
-import { supaFetch }                    from '../services/api.js';
+import { runPipeline }        from '../engine/pipeline.js';
+import { computeAllocations } from '../engine/outlier.js';
+import * as cache             from '../services/cache.js';
+import { supaFetch }          from '../services/api.js';
 import {
   DEFAULT_WEIGHTS,
   SEED_SCORES,
@@ -30,6 +29,13 @@ import {
 // ---------------------------------------------------------------------------
 
 /**
+ * Clamp a number between min and max.
+ */
+function clamp(val, min, max) {
+  return Math.min(max, Math.max(min, val));
+}
+
+/**
  * Builds the initial seed fund array by merging a list of { ticker, name }
  * objects with SEED_SCORES defaults. If a ticker has no entry in SEED_SCORES
  * (e.g. a fund the user added manually), we default all sub-scores to 5.0.
@@ -38,27 +44,29 @@ function buildSeedFunds(fundList) {
   return fundList.map(f => {
     const ticker = (f.ticker || '').toUpperCase();
     const seed   = SEED_SCORES[ticker] ?? {
-      composite:      5.0,
-      mandateScore:   5.0,
-      momentum:       5.0,
-      riskAdj:        5.0,
-      managerQuality: 5.0,
+      composite:       5.0,
+      sectorAlignment: 5.0,
+      momentum:        5.0,
+      holdingsQuality: 5.0,
     };
 
     return {
       ticker,
-      name:           f.name ?? f.fund_name ?? ticker,
-      sort_order:     f.sort_order ?? 0,
-      composite:      seed.composite,
-      mandateScore:   seed.mandateScore,
-      momentum:       seed.momentum,
-      riskAdj:        seed.riskAdj,
-      managerQuality: seed.managerQuality,
-      modZ:           0,
-      allocPct:       0,
-      tier:           { label: 'NEUTRAL', color: '#6b7280', description: 'In line with peers' },
-      isMoneyMarket:  MONEY_MARKET_TICKERS.has(ticker),
-      dataQuality:    {},
+      name:               f.name ?? f.fund_name ?? ticker,
+      sort_order:         f.sort_order ?? 0,
+      composite:          seed.composite,
+      sectorAlignment:    seed.sectorAlignment,
+      momentum:           seed.momentum,
+      holdingsQuality:    seed.holdingsQuality,
+      concentrationPenalty: 0,
+      expenseModifier:    0,
+      flowModifier:       0,
+      turnoverModifier:   0,
+      modZ:               0,
+      allocation_pct:     0,
+      tier:               'NEUTRAL',
+      isMoneyMarket:      MONEY_MARKET_TICKERS.has(ticker),
+      dataQuality:        {},
     };
   });
 }
@@ -72,10 +80,9 @@ function normaliseWeights(row) {
   if (!row) return { ...DEFAULT_WEIGHTS };
 
   return {
-    mandateScore:   row.mandateScore   ?? row.mandate_score   ?? DEFAULT_WEIGHTS.mandateScore,
-    momentum:       row.momentum       ?? row.momentum        ?? DEFAULT_WEIGHTS.momentum,
-    riskAdj:        row.riskAdj        ?? row.risk_adj        ?? DEFAULT_WEIGHTS.riskAdj,
-    managerQuality: row.managerQuality ?? row.manager_quality ?? DEFAULT_WEIGHTS.managerQuality,
+    sectorAlignment: row.sectorAlignment ?? row.sector_alignment ?? DEFAULT_WEIGHTS.sectorAlignment,
+    momentum:        row.momentum        ?? DEFAULT_WEIGHTS.momentum,
+    holdingsQuality: row.holdingsQuality ?? row.holdings_quality ?? DEFAULT_WEIGHTS.holdingsQuality,
   };
 }
 
@@ -94,24 +101,17 @@ const useAppStore = create((set, get) => ({
 
   // ── Pipeline results ──────────────────────────────────────────────────────
   funds:          [],    // scored + allocated fund objects — the main data array
-  thesis:         null,  // result from generateThesis
-  sectorScores:   null,  // { sectorName: score, ... }
-  allocation:     [],    // same array as funds, exposed separately for clarity
+  thesis:         null,  // result from generateThesis (full object)
+  sectorScores:   null,  // { sectorName: { score, reason }, ... }
+  allocations:    [],    // raw outlier.js output array
   worldData:      null,  // raw world data (FRED, GDELT, Treasury)
-  holdingsMap:    {},    // ticker → holdings array
-  mandateScores:  {},    // ticker → { mandateScore, reasoning }
-  managerScores:  {},    // ticker → { score, reasoning }
+  holdingsMap:    {},    // ticker → { holdings, meta } from edgar.js
   investorLetter: null,  // plain-English investor letter (string)
   dataQuality:    null,  // { fredOk, gdeltOk, ... }
 
-  // Private — kept in state so rescoreLocal can call calcCompositeScores
-  // without re-fetching. Never read directly by UI components.
-  _tiingoData:    {},
-  _expenseRatios: {},
-
   // ── Pipeline state ────────────────────────────────────────────────────────
   isRunning:      false,
-  pipelineStep:   0,     // 1–10
+  pipelineStep:   0,     // 1–11
   pipelineDetail: '',    // sub-step detail text shown in overlay
   source:         'seed', // 'seed' | 'loading' | 'live'
 
@@ -174,7 +174,7 @@ const useAppStore = create((set, get) => ({
         weights,
         riskTolerance,
         funds,
-        allocation:     funds,
+        allocations:    [],
         dataSourcePrefs,
         source:         'seed',
       });
@@ -198,7 +198,7 @@ const useAppStore = create((set, get) => ({
 
   // ── runPipelineAction ─────────────────────────────────────────────────────
   /**
-   * Executes the full 10-step scoring pipeline and populates the store with
+   * Executes the full 11-step scoring pipeline and populates the store with
    * live results. Guards against concurrent runs.
    */
   async runPipelineAction() {
@@ -228,50 +228,24 @@ const useAppStore = create((set, get) => ({
       );
 
       // pipeline.js returns:
-      //   { funds, thesis, sectorScores, worldData, holdingsMap,
-      //     mandateScores, managerScores, dataQuality }
+      //   { funds, allocations, thesis, sectorScores, worldData,
+      //     holdingsMap, investorLetter, dataQuality }
       //
-      // Each fund in result.funds already has modZ, tier, and allocPct
-      // because pipeline Step 9 ran computeOutliersAndAllocation.
-
-      // Reconstruct private caches from fund objects so rescoreLocal works.
-      const _tiingoData    = {};
-      const _expenseRatios = {};
-
-      for (const f of result.funds) {
-        const t = f.ticker;
-        // Tiingo data is embedded in the fund object after scoring.
-        _tiingoData[t] = {
-          momentum: f.momentum     ?? null,
-          sharpe:   f.sharpe       ?? null,
-          riskAdj:  f.riskAdj      ?? null,
-          nav:      f.nav          ?? null,
-        };
-        // Expense ratios can be reconstructed from the fund object if present.
-        if (f.expenseGross != null || f.expenseNet != null) {
-          _expenseRatios[t] = {
-            gross: f.expenseGross ?? null,
-            net:   f.expenseNet   ?? null,
-          };
-        }
-      }
+      // Each fund in result.funds already has allocation_pct, modZ, and tier
+      // merged in because pipeline merges scored funds with allocation data.
 
       set({
         funds:          result.funds,
-        allocation:     result.funds,
+        allocations:    result.allocations    ?? [],
         thesis:         result.thesis,
         sectorScores:   result.sectorScores,
         worldData:      result.worldData,
         holdingsMap:    result.holdingsMap    ?? {},
-        mandateScores:  result.mandateScores  ?? {},
-        managerScores:  result.managerScores  ?? {},
-        investorLetter: result.thesis?.investorLetter ?? null,
+        investorLetter: result.investorLetter ?? null,
         dataQuality:    result.dataQuality    ?? {},
-        _tiingoData,
-        _expenseRatios,
         source:         'live',
         isRunning:      false,
-        pipelineStep:   10,
+        pipelineStep:   11,
         pipelineDetail: 'Done',
       });
     } catch (err) {
@@ -283,15 +257,13 @@ const useAppStore = create((set, get) => ({
   // ── rescoreLocal ─────────────────────────────────────────────────────────
   /**
    * Pure-math re-rank triggered when factor weight sliders change.
-   * Re-uses cached sub-scores — no API calls, no network round-trip.
+   * Re-uses cached sub-scores on each fund object — no API calls.
+   * Recomputes the weighted composite formula inline, then re-runs allocation.
    *
-   * @param {Object} newWeights – { mandateScore, momentum, riskAdj, managerQuality }
+   * @param {Object} newWeights – { sectorAlignment, momentum, holdingsQuality }
    */
   async rescoreLocal(newWeights) {
-    const {
-      funds, userFunds, holdingsMap, sectorScores, riskTolerance,
-      mandateScores, managerScores, _tiingoData, _expenseRatios, user,
-    } = get();
+    const { funds, riskTolerance, user } = get();
 
     if (!funds || funds.length === 0) return;
 
@@ -299,27 +271,53 @@ const useAppStore = create((set, get) => ({
     set({ weights: newWeights });
 
     try {
-      // calcCompositeScores expects the raw fund list (ticker + name), not
-      // the enriched objects, so we strip back to the minimal shape it needs.
-      const fundList = (userFunds.length > 0 ? userFunds : DEFAULT_FUNDS).map(f => ({
-        ticker: (f.ticker || '').toUpperCase(),
-        name:   f.name ?? f.fund_name ?? f.ticker,
+      const rawW1 = Number(newWeights.sectorAlignment)  || 40;
+      const rawW2 = Number(newWeights.momentum)          || 30;
+      const rawW3 = Number(newWeights.holdingsQuality)   || 30;
+
+      // Recompute composites from existing sub-scores (already on each fund).
+      const recomposited = funds.map(f => {
+        if (f.isMoneyMarket) return { ...f };
+
+        // Per-fund weight adjustment: if quality coverage was low, scoring.js
+        // halved the quality weight and added it to sector alignment.
+        let adjW1 = rawW1, adjW2 = rawW2, adjW3 = rawW3;
+        if (f.dataQuality?.qualityWeightHalved) {
+          const freed = adjW3 / 2;
+          adjW3 -= freed;
+          adjW1 += freed;
+        }
+        const wSum = adjW1 + adjW2 + adjW3 || 1;
+
+        const composite = clamp(
+          (f.sectorAlignment ?? 5) * (adjW1 / wSum) +
+          (f.momentum ?? 5)        * (adjW2 / wSum) +
+          (f.holdingsQuality ?? 5) * (adjW3 / wSum) -
+          (f.concentrationPenalty ?? 0) +
+          (f.expenseModifier ?? 0) +
+          (f.flowModifier ?? 0) +
+          (f.turnoverModifier ?? 0),
+          1.0, 10.0
+        );
+
+        return { ...f, composite: parseFloat(composite.toFixed(3)) };
+      }).sort((a, b) => b.composite - a.composite);
+
+      // Re-run allocation with updated composites.
+      const allocations = computeAllocations(recomposited, riskTolerance);
+
+      // Merge allocation data back onto fund objects.
+      const allocLookup = {};
+      for (const a of allocations) allocLookup[a.ticker] = a;
+
+      const merged = recomposited.map(f => ({
+        ...f,
+        allocation_pct: allocLookup[f.ticker]?.allocation_pct ?? 0,
+        modZ:           allocLookup[f.ticker]?.modZ            ?? 0,
+        tier:           allocLookup[f.ticker]?.tier             ?? 'NEUTRAL',
       }));
 
-      const scored = calcCompositeScores(
-        fundList,
-        mandateScores,
-        _tiingoData,
-        managerScores,
-        _expenseRatios,
-        holdingsMap,
-        sectorScores,
-        { ...newWeights, risk_tolerance: riskTolerance }
-      );
-
-      const allocated = computeOutliersAndAllocation(scored, riskTolerance);
-
-      set({ funds: allocated, allocation: allocated });
+      set({ funds: merged, allocations });
 
       // Persist new weights to Supabase asynchronously — non-blocking.
       if (user?.id) {
@@ -347,8 +345,20 @@ const useAppStore = create((set, get) => ({
 
     if (funds && funds.length > 0) {
       try {
-        const reallocated = computeOutliersAndAllocation(funds, value);
-        set({ funds: reallocated, allocation: reallocated });
+        const allocations = computeAllocations(funds, value);
+
+        // Merge allocation data back onto fund objects.
+        const allocLookup = {};
+        for (const a of allocations) allocLookup[a.ticker] = a;
+
+        const merged = funds.map(f => ({
+          ...f,
+          allocation_pct: allocLookup[f.ticker]?.allocation_pct ?? 0,
+          modZ:           allocLookup[f.ticker]?.modZ            ?? 0,
+          tier:           allocLookup[f.ticker]?.tier             ?? 'NEUTRAL',
+        }));
+
+        set({ funds: merged, allocations });
       } catch (err) {
         console.error('[store] setRiskTolerance — reallocation failed:', err?.message);
       }
@@ -457,7 +467,7 @@ const useAppStore = create((set, get) => ({
         ...seedEntry,
       ];
 
-      set({ userFunds: refreshed, funds: updatedFunds, allocation: updatedFunds });
+      set({ userFunds: refreshed, funds: updatedFunds, allocations: [] });
     } catch (err) {
       console.error('[store] addFund failed:', err?.message);
     }
@@ -492,7 +502,7 @@ const useAppStore = create((set, get) => ({
       set({
         userFunds:    refreshed,
         funds:        updatedFunds,
-        allocation:   updatedFunds,
+        allocations:  [],
         // Close the sidebar if it was showing the removed fund.
         selectedFund: selectedFund === upperTicker ? null : selectedFund,
       });
