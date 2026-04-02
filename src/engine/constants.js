@@ -1,14 +1,15 @@
 // =============================================================================
-// FundLens v5 — src/engine/constants.js
+// FundLens v5.1 — src/engine/constants.js
 // Single source of truth for all configuration constants.
 // No other file should hardcode fund lists, sector names, weights, or thresholds.
 // =============================================================================
 
 // ---------------------------------------------------------------------------
-// AI Model
+// AI Models
 // ---------------------------------------------------------------------------
 
 export const CLAUDE_MODEL = 'claude-haiku-4-5-20251001';
+export const SONNET_MODEL = 'claude-sonnet-4-20250514';
 
 // ---------------------------------------------------------------------------
 // Fund Universe (22 funds)
@@ -68,10 +69,9 @@ export const GICS_SECTORS = {
 // ---------------------------------------------------------------------------
 
 export const DEFAULT_WEIGHTS = {
-  mandateScore:   40,
-  momentum:       25,
-  riskAdj:        20,
-  managerQuality: 15,
+  sectorAlignment:  40,
+  momentum:         30,
+  holdingsQuality:  30,
 };
 
 // ---------------------------------------------------------------------------
@@ -79,13 +79,76 @@ export const DEFAULT_WEIGHTS = {
 // ---------------------------------------------------------------------------
 
 export const FACTOR_LABELS = {
-  mandateScore:   'Macro Fit',
-  momentum:       'Market Feel',
-  riskAdj:        'Room to Run',
-  managerQuality: 'Foundations',
+  sectorAlignment:  'Positioning',
+  momentum:         'Momentum',
+  holdingsQuality:  'Quality',
 };
 
-export const FACTOR_KEYS = ['mandateScore', 'momentum', 'riskAdj', 'managerQuality'];
+export const FACTOR_KEYS = ['sectorAlignment', 'momentum', 'holdingsQuality'];
+
+// ---------------------------------------------------------------------------
+// Credit Rating Map — bond holding quality scoring
+// Maps rating strings to 0–1 quality scores
+// ---------------------------------------------------------------------------
+
+export const CREDIT_RATING_MAP = {
+  'AAA': 1.0,
+  'AA':  1.0,
+  'A':   0.8,
+  'BBB': 0.6,
+  'BB':  0.4,
+  'B':   0.3,
+  'CCC': 0.15,
+  'Unrated': 0.5,
+};
+
+// ---------------------------------------------------------------------------
+// Expense Modifier Thresholds (±0.5)
+// ---------------------------------------------------------------------------
+
+export const EXPENSE_THRESHOLDS = {
+  lowCutoff:  0.005,   // net expense ratio below this → +bonus
+  highCutoff: 0.012,   // net expense ratio above this → −penalty
+  bonus:      0.5,
+  penalty:   -0.5,
+};
+
+// ---------------------------------------------------------------------------
+// Flow Modifier (±0.2)
+// From NPORT fund-level flow data (subscriptions − redemptions)
+// ---------------------------------------------------------------------------
+
+export const FLOW_MODIFIER = {
+  inflow:  0.2,
+  outflow: -0.2,
+};
+
+// ---------------------------------------------------------------------------
+// Turnover Modifier (−0.2 max)
+// High turnover = higher hidden costs and tax drag. No bonus for low turnover.
+// ---------------------------------------------------------------------------
+
+export const TURNOVER_THRESHOLDS = {
+  highCutoff:    1.5,   // turnover ratio > 150% → max penalty
+  mediumCutoff:  1.0,   // turnover ratio > 100% → partial penalty
+  highPenalty:  -0.2,
+  mediumPenalty: -0.1,
+};
+
+// ---------------------------------------------------------------------------
+// Concentration Penalty (0–2 range)
+// HHI-based, scales inversely with risk tolerance slider
+// ---------------------------------------------------------------------------
+
+export const CONCENTRATION = {
+  hhiBaseline:    0.15,   // HHI below this → no penalty
+  scalingFactor:  2.35,   // maps excess HHI to 0–2 penalty range
+  riskBase:       1.5,    // risk_multiplier = riskBase − (riskTolerance − 1) × riskStep
+  riskStep:       0.125,  // per-notch reduction in penalty strength
+  // risk_tolerance=1 (Diversified)   → multiplier = 1.500 (strongest penalty)
+  // risk_tolerance=5 (balanced)      → multiplier = 1.000 (neutral)
+  // risk_tolerance=9 (Concentrated)  → multiplier = 0.500 (weakest penalty)
+};
 
 // ---------------------------------------------------------------------------
 // Tier Classification — Modified Z-Score thresholds
@@ -129,11 +192,10 @@ export function getTierFromModZ(modZ) {
 // ---------------------------------------------------------------------------
 
 const _defaultSeed = () => ({
-  composite:      5.0,
-  mandateScore:   5.0,
-  momentum:       5.0,
-  riskAdj:        5.0,
-  managerQuality: 5.0,
+  composite:        5.0,
+  sectorAlignment:  5.0,
+  momentum:         5.0,
+  holdingsQuality:  5.0,
 });
 
 export const SEED_SCORES = Object.fromEntries(
@@ -142,7 +204,7 @@ export const SEED_SCORES = Object.fromEntries(
 
 // ---------------------------------------------------------------------------
 // Static Expense Map — fallback when Finnhub is unavailable
-// Values are annual expense ratios (e.g. 0.015 = 0.015%)
+// Values are annual expense ratios (e.g. 0.0082 = 0.82%)
 // ---------------------------------------------------------------------------
 
 export const STATIC_EXPENSE_MAP = {
@@ -171,18 +233,19 @@ export const STATIC_EXPENSE_MAP = {
 };
 
 // ---------------------------------------------------------------------------
-// Pipeline Step Labels (10 steps, in order)
+// Pipeline Step Labels (11 steps, in order)
 // ---------------------------------------------------------------------------
 
 export const PIPELINE_STEPS = [
   'Fetching economic data',
   'Generating investment thesis',
   'Loading fund holdings',
+  'Classifying holdings by sector',
   'Fetching price metrics',
+  'Fetching holdings fundamentals',
   'Analyzing expense ratios',
-  'Evaluating fund managers',
-  'Scoring mandate alignment',
-  'Computing final scores',
+  'Computing composite scores',
   'Detecting outliers & computing allocation',
+  'Generating investor letter',
   'Saving results',
 ];
