@@ -209,6 +209,7 @@ export default function PipelineOverlay() {
                   </div>
 
                   {/* Detail text — only on the active step, when present */}
+                  {/* pipelineDetail may be a string or a {step, status, message} object */}
                   {isActive && pipelineDetail && (
                     <div style={{
                       marginLeft:  34,   // dot (22) + gap (12)
@@ -218,7 +219,9 @@ export default function PipelineOverlay() {
                       fontFamily:  'Inter, sans-serif',
                       lineHeight:  1.5,
                     }}>
-                      {pipelineDetail}
+                      {typeof pipelineDetail === 'string'
+                        ? pipelineDetail
+                        : pipelineDetail.message ?? ''}
                     </div>
                   )}
                 </div>
