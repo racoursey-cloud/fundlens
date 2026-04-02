@@ -1,16 +1,19 @@
 // =============================================================================
-// FundLens v5 — src/engine/outlier.js
+// FundLens v5.1 — src/engine/outlier.js
 // Modified Z-Score outlier detection + exponential allocation engine.
 //
 // Steps:
 //   1. Modified Z-Score on composite scores (money market excluded)
 //   2. Quality gates: below-median (modZ < 0) or low-data (≥4 fallbacks) → 0%
-//   3. Exponential allocation: k = 0.1 + (riskTolerance × 0.20)
+//   3. Exponential allocation: k = 0.1 + (riskTolerance × 0.20), weight = e^(k × Z)
 //   4. 30% per-fund hard cap with proportional redistribution
 //   5. Round to 1 decimal, absorb rounding error into largest holding
+//
+// No Claude calls. No external API calls. Pure math.
+// Concentration penalty is already applied in scoring.js — not recalculated here.
 // =============================================================================
 
-import { getTierFromModZ } from './constants.js';
+import { CONCENTRATION, MONEY_MARKET_TICKERS, getTierFromModZ } from './constants.js';
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -25,18 +28,32 @@ function median(arr) {
     : (sorted[mid - 1] + sorted[mid]) / 2;
 }
 
+/** Clamp risk tolerance to the valid 1–9 slider range. */
+function clampRisk(rt) {
+  if (!Number.isFinite(rt)) return 5;
+  return Math.min(9, Math.max(1, rt));
+}
+
 // ---------------------------------------------------------------------------
 // Main export
 // ---------------------------------------------------------------------------
 
 /**
- * Attaches modZ, tier, and allocPct to every fund.
+ * Computes allocation percentages from scored funds.
  *
- * @param {Array}  scoredFunds   - Output of calcCompositeScores()
- * @param {number} riskTolerance - Slider value 1–9
- * @returns {Array} Fund objects with modZ, tier, allocPct, sorted by composite desc
+ * @param {Array}  scoredFunds   - Sorted array from scoring.js calcCompositeScores()
+ *   Each: { ticker, name, composite, sectorAlignment, momentum, holdingsQuality,
+ *           concentrationPenalty, expenseModifier, flowModifier, turnoverModifier,
+ *           sectorBreakdown, isMoneyMarket, dataQuality }
+ *   dataQuality: { sectorAlignmentFallback, momentumFallback, holdingsQualityFallback,
+ *                  qualityWeightHalved, fallbackCount }
+ *
+ * @param {number} riskTolerance - Investment Style slider value 1–9
+ *
+ * @returns {Array} Objects with { ticker, allocation_pct (0–1), tier (string), modZ, composite }
+ *   Sorted by allocation_pct descending. Non-allocated funds appear with allocation_pct = 0.
  */
-export function computeOutliersAndAllocation(scoredFunds, riskTolerance) {
+export function computeAllocations(scoredFunds, riskTolerance) {
   if (!Array.isArray(scoredFunds) || scoredFunds.length === 0) return [];
 
   // ── STEP 1 — Modified Z-Score ─────────────────────────────────────────────
@@ -51,58 +68,57 @@ export function computeOutliersAndAllocation(scoredFunds, riskTolerance) {
   // Avoid division by zero when all scores are identical
   const safeMad = mad === 0 ? 1e-9 : mad;
 
+  // Attach modZ and tier to every fund
   const withZ = scoredFunds.map(fund => {
     if (fund.isMoneyMarket) {
       return {
-        ...fund,
-        modZ:    'MONEY_MARKET',
-        tier:    getTierFromModZ('MONEY_MARKET'),
-        allocPct: 0,
+        ticker:    fund.ticker,
+        composite: fund.composite,
+        modZ:      'MONEY_MARKET',
+        tier:      getTierFromModZ('MONEY_MARKET').label,
+        _excluded: true,
       };
     }
 
-    const modZ = 0.6745 * (fund.composite - med) / safeMad;
-    const tier = (fund.dataQuality?.fallbackCount ?? 0) >= 4
-      ? getTierFromModZ('LOW_DATA')
-      : getTierFromModZ(modZ);
+    const modZ        = 0.6745 * (fund.composite - med) / safeMad;
+    const fallbacks   = fund.dataQuality?.fallbackCount ?? 0;
+    const isLowData   = fallbacks >= 4;
+    const belowMedian = modZ < 0;
 
-    return { ...fund, modZ, tier };
+    const tier = isLowData
+      ? getTierFromModZ('LOW_DATA').label
+      : getTierFromModZ(modZ).label;
+
+    return {
+      ticker:    fund.ticker,
+      composite: fund.composite,
+      modZ,
+      tier,
+      _excluded: belowMedian || isLowData,
+    };
   });
 
-  // ── STEP 2 — Quality Gates ────────────────────────────────────────────────
-  // Gate 1: below median → excluded (modZ < 0)
-  // Gate 2: low data confidence → excluded (fallbackCount >= 4)
-  // Money market: always excluded from allocation
-  const gated = withZ.map(fund => {
-    if (fund.isMoneyMarket) return { ...fund, _excluded: true };
-
-    const belowMedian  = fund.modZ < 0;
-    const lowData      = (fund.dataQuality?.fallbackCount ?? 0) >= 4;
-
-    return { ...fund, _excluded: belowMedian || lowData };
-  });
-
-  // ── STEP 3 — Exponential Allocation ──────────────────────────────────────
+  // ── STEP 2 — Exponential Allocation ───────────────────────────────────────
   const rt = clampRisk(Number(riskTolerance));
   const k  = 0.1 + (rt * 0.20);
 
-  const eligible = gated.filter(f => !f._excluded);
+  const eligible = withZ.filter(f => !f._excluded);
 
-  // rawWeight = composite × e^(modZ × k)
+  // Pure exponential: weight = e^(k × Z)
   const rawEntries = eligible.map(fund => ({
     ticker:    fund.ticker,
-    rawWeight: fund.composite * Math.exp(fund.modZ * k),
+    rawWeight: Math.exp(k * fund.modZ),
   }));
 
   const totalRaw = rawEntries.reduce((acc, e) => acc + e.rawWeight, 0) || 1;
 
-  // Normalise to 100%
+  // Normalise to 100 (internal percentages for cap logic)
   const allocMap = {};
   for (const { ticker, rawWeight } of rawEntries) {
     allocMap[ticker] = (rawWeight / totalRaw) * 100;
   }
 
-  // ── STEP 4 — 30% Position Cap ─────────────────────────────────────────────
+  // ── STEP 3 — 30% Position Cap ─────────────────────────────────────────────
   // Iteratively redistribute excess from capped funds to uncapped funds.
   const CAP = 30;
 
@@ -112,21 +128,19 @@ export function computeOutliersAndAllocation(scoredFunds, riskTolerance) {
 
     if (capped.length === 0) break;
 
-    // Collect excess
     let excess = 0;
     for (const [ticker] of capped) {
       excess          += allocMap[ticker] - CAP;
       allocMap[ticker] = CAP;
     }
 
-    // Redistribute proportionally to uncapped funds
     const uncappedSum = uncapped.reduce((acc, [, v]) => acc + v, 0) || 1;
     for (const [ticker, val] of uncapped) {
       allocMap[ticker] = val + excess * (val / uncappedSum);
     }
   }
 
-  // ── STEP 5 — Final Cleanup ────────────────────────────────────────────────
+  // ── STEP 4 — Rounding Cleanup ─────────────────────────────────────────────
   // Round each position to 1 decimal place.
   for (const ticker of Object.keys(allocMap)) {
     allocMap[ticker] = parseFloat(allocMap[ticker].toFixed(1));
@@ -144,26 +158,20 @@ export function computeOutliersAndAllocation(scoredFunds, riskTolerance) {
     }
   }
 
-  // ── Assemble final output ─────────────────────────────────────────────────
-  const final = gated.map(fund => {
-    const allocPct = fund._excluded ? 0 : (allocMap[fund.ticker] ?? 0);
+  // ── STEP 5 — Assemble Return Shape ────────────────────────────────────────
+  // { ticker, allocation_pct (0–1 decimal), tier (string), modZ, composite }
+  // Sorted by allocation_pct descending. Non-allocated funds have allocation_pct = 0.
+  const result = withZ.map(fund => {
+    const pctInternal = fund._excluded ? 0 : (allocMap[fund.ticker] ?? 0);
 
-    // Strip internal _excluded flag from output
-    const { _excluded, ...rest } = fund;   // eslint-disable-line no-unused-vars
-    return { ...rest, allocPct };
+    return {
+      ticker:         fund.ticker,
+      allocation_pct: parseFloat((pctInternal / 100).toFixed(4)),
+      tier:           fund.tier,
+      modZ:           fund.modZ,
+      composite:      fund.composite,
+    };
   });
 
-  // Sort by composite descending (money market floats to bottom naturally
-  // because their composite is always 5.0 and most scored funds score above that)
-  return final.sort((a, b) => b.composite - a.composite);
-}
-
-// ---------------------------------------------------------------------------
-// Private helpers
-// ---------------------------------------------------------------------------
-
-/** Clamp risk tolerance to the valid 1–9 slider range. */
-function clampRisk(rt) {
-  if (!Number.isFinite(rt)) return 5;
-  return Math.min(9, Math.max(1, rt));
+  return result.sort((a, b) => b.allocation_pct - a.allocation_pct);
 }
