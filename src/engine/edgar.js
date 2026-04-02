@@ -2,6 +2,21 @@
 // Fetches fund holdings from SEC EDGAR NPORT-P filings for all fund tickers.
 // Results are cached in Supabase holdings_cache (15-day TTL).
 //
+// v5.1 enhancements (A2):
+//   - Extracts per-holding: cusip, issuerCat, fairValLevel, fundCat (liquidity),
+//     and debtSec details (isDefault, couponKind, maturityDt, annualizedRt)
+//   - Extracts fund-level meta: netFlows (Item B.6), totalAssets, netAssets, reportDate
+//   - Return shape changed: fetchAllHoldings() now returns
+//       { TICKER: { holdings: [...], meta: { netFlows, totalAssets, ... } } }
+//     Pipeline.js (A9) must consume this shape. Cached results return meta: null
+//     until cache.js is updated (A10) to persist fund-level meta.
+//
+// NOTE — fields NOT available in NPORT-P XML (pre-work spot-check, April 2026):
+//   - Per-holding credit ratings (AAA/BBB/etc): NOT a standard NPORT field.
+//     quality.js (A4) uses issuerCat + isDefault + fairValLevel as proxies.
+//   - Fund turnover ratio: reported in N-CEN, not NPORT-P.
+//     Turnover modifier defaults to 0.0 in scoring.js (A6).
+//
 // 3-strategy CIK resolution per ticker:
 //   1. MF tickers file  — /api/www4sec/files/company_tickers_mf.json (array-of-arrays)
 //   2. EFTS full-text search — /api/efts/LATEST/search-index
@@ -56,6 +71,20 @@ function stripDashes(accNo) {
 function xmlText(parent, tagName) {
   const el = parent.querySelector(tagName);
   return el ? (el.textContent || '').trim() : null;
+}
+
+/**
+ * Reads a value from an XML element, checking the "value" attribute first
+ * (NPORT schema convention for identifiers), then falling back to textContent.
+ * Returns null if the element is not found or has no value.
+ */
+function xmlAttrOrText(parent, tagName) {
+  const el = parent.querySelector(tagName);
+  if (!el) return null;
+  const attr = el.getAttribute('value');
+  if (attr && attr.trim()) return attr.trim();
+  const text = (el.textContent || '').trim();
+  return text || null;
 }
 
 // ---------------------------------------------------------------------------
@@ -283,6 +312,9 @@ async function fetchPrimaryXmlUrl(cik, accNoDashes) {
 // Static sector map — top ~150 mutual fund equity holdings by GICS sector.
 // Used to enrich NPORT-P holdings whose XML carries no sector label.
 // Covers the majority of positions in large-cap US equity funds.
+//
+// NOTE: classify.js (A3) replaces this with Claude Haiku classification.
+// This map remains as a zero-cost first-pass enrichment.
 // ---------------------------------------------------------------------------
 const SECTOR_MAP = {
   // Technology
@@ -382,7 +414,6 @@ function enrichHoldingsWithSectors(holdings) {
     DBT: null,                      // debt — skip sector
     RF:  null,                      // registered fund — skip
     ABS: null,                      // asset-backed — skip
-    MBS: null,                      // mortgage-backed — skip
   };
 
   return holdings.map(h => {
@@ -404,25 +435,116 @@ function enrichHoldingsWithSectors(holdings) {
 }
 
 // ---------------------------------------------------------------------------
+// Fund-level metadata extraction
+// ---------------------------------------------------------------------------
+
+/**
+ * Extracts fund-level metadata from a parsed NPORT-P XML document.
+ *
+ * Returns:
+ *   {
+ *     totalAssets:  number | null,
+ *     netAssets:    number | null,
+ *     netFlows:     number | null,   // Item B.6: (sales + reinvest) − redemptions
+ *     reportDate:   string | null,   // YYYY-MM-DD
+ *   }
+ *
+ * Flow data (Item B.6) covers the preceding 3 months. We sum all months to
+ * produce a single net flow figure:
+ *   positive = net inflows  → flow modifier +0.2 in scoring.js
+ *   negative = net outflows → flow modifier −0.2 in scoring.js
+ *
+ * NOTE: Turnover ratio is NOT available in NPORT-P (reported in N-CEN).
+ *       Turnover modifier defaults to 0.0 in scoring.js (A6).
+ */
+function extractFundMeta(xmlDoc) {
+  const meta = {
+    totalAssets: null,
+    netAssets:   null,
+    netFlows:    null,
+    reportDate:  null,
+  };
+
+  // ── Total assets / net assets (Item B.1) ────────────────────────────────
+  const totStr = xmlText(xmlDoc, 'totAssets');
+  const netStr = xmlText(xmlDoc, 'netAssets');
+  if (totStr) { const v = parseFloat(totStr); if (!isNaN(v)) meta.totalAssets = v; }
+  if (netStr) { const v = parseFloat(netStr); if (!isNaN(v)) meta.netAssets = v; }
+
+  // ── Report period end date (Part A.3) ───────────────────────────────────
+  const repDate = xmlText(xmlDoc, 'repPdEnd') || xmlText(xmlDoc, 'repPdDate');
+  if (repDate) meta.reportDate = repDate;
+
+  // ── Flow data (Item B.6) ────────────────────────────────────────────────
+  // NPORT XML contains 3 months of flow data. Each month has:
+  //   <salesAmt>, <reinvestAmt> (inflows)
+  //   <redemAmt> (outflows)
+  // We sum across all months for a 3-month aggregate.
+  let totalInflows  = 0;
+  let totalOutflows = 0;
+  let hasFlowData   = false;
+
+  for (const el of xmlDoc.querySelectorAll('salesAmt')) {
+    const v = parseFloat(el.textContent);
+    if (!isNaN(v)) { totalInflows += v; hasFlowData = true; }
+  }
+  for (const el of xmlDoc.querySelectorAll('reinvestAmt')) {
+    const v = parseFloat(el.textContent);
+    if (!isNaN(v)) { totalInflows += v; hasFlowData = true; }
+  }
+  for (const el of xmlDoc.querySelectorAll('redemAmt')) {
+    const v = parseFloat(el.textContent);
+    if (!isNaN(v)) { totalOutflows += v; hasFlowData = true; }
+  }
+
+  if (hasFlowData) {
+    meta.netFlows = totalInflows - totalOutflows;
+  }
+
+  return meta;
+}
+
+// ---------------------------------------------------------------------------
 // NPORT-P XML parser
 // ---------------------------------------------------------------------------
 
 /**
  * Fetches and parses a NPORT-P XML document.
- * Returns an array of holding objects sorted by pctVal descending (top 200).
+ * Returns { holdings: [...], meta: { totalAssets, netAssets, netFlows, reportDate } }.
+ *
+ * Holdings are sorted by pctVal descending (top 200).
  *
  * Each holding:
- *   { holding_name, holding_ticker, weight, market_value, asset_type, sector }
+ *   {
+ *     holding_name,        // issuer name
+ *     holding_ticker,      // equity ticker (if available)
+ *     cusip,               // CUSIP identifier (v5.1)
+ *     weight,              // pctVal — percentage of NAV
+ *     market_value,        // valUSD — dollar value
+ *     asset_type,          // NPORT assetCat: EC, EP, DBT, STIV, etc.
+ *     issuer_cat,          // NPORT issuerCat: corporate, UST, USG, etc. (v5.1)
+ *     liquidity_class,     // NPORT fundCat: HLI, MLI, LLI, ILI (v5.1)
+ *     fair_val_level,      // NPORT fairValLevel: 1, 2, 3 (v5.1)
+ *     is_debt,             // boolean: true if debtSec section exists (v5.1)
+ *     debt_is_default,     // Y/N from debtSec.isDefault (v5.1)
+ *     debt_in_arrears,     // Y/N from debtSec.areIntrstPmntsInArrs (v5.1)
+ *     debt_coupon_kind,    // Fixed/Floating/Variable/None (v5.1)
+ *     debt_annualized_rt,  // annualized rate as number (v5.1)
+ *     debt_maturity_dt,    // YYYY-MM-DD maturity date (v5.1)
+ *     sector,              // GICS sector (enriched by SECTOR_MAP, then A3 classify.js)
+ *   }
  *
  * pctVal is already a percentage (5.2 = 5.2% — stored as weight directly).
  */
 async function parseNportXml(xmlUrl) {
+  const empty = { holdings: [], meta: null };
+
   try {
     const res = await fetch(xmlUrl);
-    if (!res.ok) return [];
+    if (!res.ok) return empty;
 
     const text = await res.text();
-    if (!text || text.length < 100) return [];
+    if (!text || text.length < 100) return empty;
 
     const parser  = new DOMParser();
     const xmlDoc  = parser.parseFromString(text, 'text/xml');
@@ -431,12 +553,17 @@ async function parseNportXml(xmlUrl) {
     const parseErr = xmlDoc.querySelector('parsererror');
     if (parseErr) {
       console.warn('[edgar] XML parse error:', parseErr.textContent?.slice(0, 200));
-      return [];
+      return empty;
     }
 
-    // <invstOrSec> blocks contain individual holdings
+    // ── Fund-level metadata ──────────────────────────────────────────────
+    const meta = extractFundMeta(xmlDoc);
+
+    // ── Per-holding extraction ───────────────────────────────────────────
     const securities = xmlDoc.querySelectorAll('invstOrSec');
-    if (!securities || securities.length === 0) return [];
+    if (!securities || securities.length === 0) {
+      return { holdings: [], meta };
+    }
 
     const holdings = [];
 
@@ -446,13 +573,45 @@ async function parseNportXml(xmlUrl) {
       const valUSDStr  = xmlText(sec, 'valUSD');
       const assetCat   = xmlText(sec, 'assetCat');
 
-      // Ticker lives inside <identifiers><ticker> or <ticker>
+      // ── Identifiers block ──────────────────────────────────────────────
       const identifiers   = sec.querySelector('identifiers');
+
+      // Ticker: textContent (some filers) or value attr (schema convention)
       const tickerEl      = identifiers
         ? identifiers.querySelector('ticker')
         : sec.querySelector('ticker');
-      const holdingTicker = tickerEl ? tickerEl.textContent.trim() : null;
+      const holdingTicker = tickerEl
+        ? (tickerEl.getAttribute('value') || tickerEl.textContent || '').trim() || null
+        : null;
 
+      // CUSIP (v5.1): value attribute is the standard, fallback to textContent
+      const cusip = identifiers ? xmlAttrOrText(identifiers, 'cusip') : null;
+
+      // ── New v5.1 fields ────────────────────────────────────────────────
+      const issuerCat    = xmlText(sec, 'issuerCat');
+      const fundCatVal   = xmlText(sec, 'fundCat');
+      const fairValLevel = xmlText(sec, 'fairValLevel');
+
+      // Debt security details (only present for debt holdings)
+      const debtSecEl = sec.querySelector('debtSec');
+      const isDbt     = debtSecEl != null;
+
+      let debtIsDefault    = null;
+      let debtInArrears    = null;
+      let debtCouponKind   = null;
+      let debtAnnualizedRt = null;
+      let debtMaturityDt   = null;
+
+      if (debtSecEl) {
+        debtIsDefault    = xmlText(debtSecEl, 'isDefault');
+        debtInArrears    = xmlText(debtSecEl, 'areIntrstPmntsInArrs');
+        debtCouponKind   = xmlText(debtSecEl, 'couponKind');
+        debtMaturityDt   = xmlText(debtSecEl, 'maturityDt');
+        const rtStr      = xmlText(debtSecEl, 'annualizedRt');
+        if (rtStr) { const v = parseFloat(rtStr); if (!isNaN(v)) debtAnnualizedRt = v; }
+      }
+
+      // ── Parse numerics ─────────────────────────────────────────────────
       const pctVal  = pctValStr  ? parseFloat(pctValStr)  : null;
       const valUSD  = valUSDStr  ? parseFloat(valUSDStr)  : null;
 
@@ -460,22 +619,32 @@ async function parseNportXml(xmlUrl) {
       if (!name || pctVal == null || isNaN(pctVal)) continue;
 
       holdings.push({
-        holding_name:   name,
-        holding_ticker: holdingTicker || null,
-        weight:         pctVal,
-        market_value:   (!isNaN(valUSD) ? valUSD : null),
-        asset_type:     assetCat || null,
-        sector:         null,  // sector enriched later by sector mapping engine
+        holding_name:       name,
+        holding_ticker:     holdingTicker || null,
+        cusip:              cusip || null,
+        weight:             pctVal,
+        market_value:       (!isNaN(valUSD) ? valUSD : null),
+        asset_type:         assetCat || null,
+        issuer_cat:         issuerCat || null,
+        liquidity_class:    fundCatVal || null,
+        fair_val_level:     fairValLevel || null,
+        is_debt:            isDbt,
+        debt_is_default:    debtIsDefault,
+        debt_in_arrears:    debtInArrears,
+        debt_coupon_kind:   debtCouponKind,
+        debt_annualized_rt: debtAnnualizedRt,
+        debt_maturity_dt:   debtMaturityDt,
+        sector:             null,  // enriched by SECTOR_MAP then by classify.js (A3)
       });
     }
 
     // Enrich with GICS sectors then sort by weight descending, take top 200
     const enriched = enrichHoldingsWithSectors(holdings);
     enriched.sort((a, b) => (b.weight ?? 0) - (a.weight ?? 0));
-    return enriched.slice(0, 200);
+    return { holdings: enriched.slice(0, 200), meta };
   } catch (err) {
     console.warn('[edgar] XML fetch/parse error:', err.message);
-    return [];
+    return empty;
   }
 }
 
@@ -487,7 +656,9 @@ async function parseNportXml(xmlUrl) {
  * Fetches NPORT-P holdings for a single ticker.
  * Tries CIK map → submissions → archive XML.
  * Falls back to EFTS if CIK not found in map.
- * Returns an array of holding objects (may be empty on failure).
+ *
+ * Returns { holdings: [...], meta: { ... } | null }.
+ * holdings may be empty on failure; meta is null for cached or failed fetches.
  */
 async function fetchHoldingsForTicker(ticker, cikMap) {
   // ── 1. Look up CIK from the MF tickers map ───────────────────────────────
@@ -499,7 +670,7 @@ async function fetchHoldingsForTicker(ticker, cikMap) {
     cik = await resolveCIKviaEFTS(ticker);
     if (!cik) {
       console.warn(`[edgar] ${ticker} — CIK not found via map or EFTS, skipping`);
-      return [];
+      return { holdings: [], meta: null };
     }
   }
 
@@ -507,7 +678,7 @@ async function fetchHoldingsForTicker(ticker, cikMap) {
   const accNo = await fetchLatestNportAccNo(cik);
   if (!accNo) {
     console.warn(`[edgar] ${ticker} — no NPORT-P filing found for CIK ${cik}`);
-    return [];
+    return { holdings: [], meta: null };
   }
 
   // ── 4. Fetch filing index → primary XML URL ──────────────────────────────
@@ -515,13 +686,14 @@ async function fetchHoldingsForTicker(ticker, cikMap) {
   const xmlUrl = await fetchPrimaryXmlUrl(cik, accNoDashes);
   if (!xmlUrl) {
     console.warn(`[edgar] ${ticker} — could not find XML in filing index`);
-    return [];
+    return { holdings: [], meta: null };
   }
 
   // ── 5. Parse NPORT-P XML ─────────────────────────────────────────────────
-  const holdings = await parseNportXml(xmlUrl);
-  console.log(`[edgar] ${ticker} — ${holdings.length} holdings parsed`);
-  return holdings;
+  const result = await parseNportXml(xmlUrl);
+  console.log(`[edgar] ${ticker} — ${result.holdings.length} holdings parsed` +
+    (result.meta?.netFlows != null ? `, netFlows: ${result.meta.netFlows.toLocaleString()}` : ''));
+  return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -536,9 +708,19 @@ async function fetchHoldingsForTicker(ticker, cikMap) {
  * - Applies 300ms delay between live SEC fetches.
  * - Calls onProgress after every 3rd ticker.
  *
+ * v5.1 RETURN SHAPE CHANGE:
+ *   Previously: { TICKER: [holdingObject, ...] }
+ *   Now:        { TICKER: { holdings: [holdingObject, ...], meta: { ... } | null } }
+ *
+ *   meta contains { totalAssets, netAssets, netFlows, reportDate } when
+ *   fetched live from SEC. meta is null for cached results (until A10 adds
+ *   fund_nport_meta caching to cache.js).
+ *
+ *   Pipeline.js (A9) must consume this new shape.
+ *
  * @param {string[]}  fundTickers - Array of fund ticker strings.
  * @param {Function}  onProgress  - Optional callback(completedCount, totalCount).
- * @returns {Promise<Object>}     - { TICKER: [holdingObject, ...] }
+ * @returns {Promise<Object>}     - { TICKER: { holdings, meta } }
  */
 export async function fetchAllHoldings(fundTickers, onProgress) {
   const results   = {};
@@ -552,7 +734,7 @@ export async function fetchAllHoldings(fundTickers, onProgress) {
 
     // Skip money market funds
     if (MONEY_MARKET_TICKERS.has(ticker)) {
-      results[ticker] = [];
+      results[ticker] = { holdings: [], meta: null };
       completed++;
       if (completed % 3 === 0 && onProgress) onProgress(completed, fundTickers.length);
       continue;
@@ -567,31 +749,36 @@ export async function fetchAllHoldings(fundTickers, onProgress) {
     }
 
     if (cached && cached.length > 0) {
-      results[ticker] = cached;
+      // Cached holdings don't include v5.1 fields (cusip, issuer_cat, etc.)
+      // or fund-level meta until cache.js is updated (A10).
+      results[ticker] = { holdings: cached, meta: null };
       completed++;
       if (completed % 3 === 0 && onProgress) onProgress(completed, fundTickers.length);
       continue;
     }
 
     // ── Live SEC fetch ────────────────────────────────────────────────────
-    let holdings = [];
+    let result = { holdings: [], meta: null };
     try {
-      holdings = await fetchHoldingsForTicker(ticker, cikMap);
+      result = await fetchHoldingsForTicker(ticker, cikMap);
     } catch (err) {
       console.warn(`[edgar] ${ticker} unexpected error:`, err.message);
     }
 
-    // Persist to Supabase regardless of whether holdings is empty
-    // (saveHoldings handles empty arrays gracefully — it just clears the rows)
-    if (holdings.length > 0) {
+    // Persist holdings to Supabase cache.
+    // NOTE: New v5.1 fields (cusip, issuer_cat, debt_*, etc.) are NOT saved
+    // to cache yet — saveHoldings maps only the original column set.
+    // A10 will add these columns to holdings_cache and update saveHoldings.
+    // For now, the new fields exist only in-memory for the current pipeline run.
+    if (result.holdings.length > 0) {
       try {
-        await saveHoldings(ticker, holdings);
+        await saveHoldings(ticker, result.holdings);
       } catch (saveErr) {
         console.warn(`[edgar] ${ticker} cache save error:`, saveErr.message);
       }
     }
 
-    results[ticker] = holdings;
+    results[ticker] = result;
     completed++;
     if (completed % 3 === 0 && onProgress) onProgress(completed, fundTickers.length);
 
