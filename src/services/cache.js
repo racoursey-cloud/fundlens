@@ -1,5 +1,5 @@
 // src/services/cache.js
-// All Supabase cache read/write helpers for FundLens v5.
+// All Supabase cache read/write helpers for FundLens v5.1.
 // Every function routes through supaFetch() from api.js.
 // No direct Supabase calls. No localStorage.
 //
@@ -12,6 +12,13 @@
 //   source_registry   → no TTL   (admin-managed)
 //   world / run /     → no TTL   (caller decides when to refresh)
 //   user tables
+//
+// A10 changes:
+//   - getTiingoCache now returns rawData field (raw_data column) so tiingo.js
+//     can restore dailyReturns from cache hits.
+//   - saveHoldings now persists v5.1 A2 fields: cusip, issuer_cat,
+//     liquidity_class, fair_val_level, is_debt, debt_is_default,
+//     debt_in_arrears, debt_coupon_kind, debt_annualized_rt, debt_maturity_dt.
 
 import { supaFetch } from './api.js';
 
@@ -30,7 +37,7 @@ function isStale(isoString, days) {
   return new Date(isoString) < daysAgo(days);
 }
 
-// Build an IN() filter list: ticker=in.(\"FXAIX\",\"VFIAX\")
+// Build an IN() filter list: ticker=in.("FXAIX","VFIAX")
 function inList(tickers) {
   return tickers.map(t => `"${t}"`).join(',');
 }
@@ -141,6 +148,11 @@ export async function getHoldings(fundTicker) {
 /**
  * Replaces all holdings rows for a fund and inserts the fresh batch.
  * Rows are inserted in groups of 50 to avoid PostgREST payload limits.
+ *
+ * A10: Now persists v5.1 fields from edgar.js A2:
+ *   cusip, issuer_cat, liquidity_class, fair_val_level, is_debt,
+ *   debt_is_default, debt_in_arrears, debt_coupon_kind,
+ *   debt_annualized_rt, debt_maturity_dt
  */
 export async function saveHoldings(fundTicker, holdingsArray) {
   // Remove existing rows for this ticker first.
@@ -153,15 +165,27 @@ export async function saveHoldings(fundTicker, holdingsArray) {
 
   const now = new Date().toISOString();
   const rows = holdingsArray.map(h => ({
-    fund_ticker:    fundTicker,
-    holding_name:   h.holding_name   ?? h.name   ?? null,
-    holding_ticker: h.holding_ticker ?? h.ticker  ?? null,
-    weight:         h.weight         ?? null,
-    market_value:   h.market_value   ?? h.marketValue ?? null,
-    shares:         h.shares         ?? null,
-    asset_type:     h.asset_type     ?? h.assetType   ?? null,
-    sector:         h.sector         ?? null,
-    cached_at:      now,
+    fund_ticker:        fundTicker,
+    holding_name:       h.holding_name   ?? h.name   ?? null,
+    holding_ticker:     h.holding_ticker ?? h.ticker  ?? null,
+    weight:             h.weight         ?? null,
+    market_value:       h.market_value   ?? h.marketValue ?? null,
+    shares:             h.shares         ?? null,
+    asset_type:         h.asset_type     ?? h.assetType   ?? null,
+    sector:             h.sector         ?? null,
+    // ── v5.1 A2 fields ──────────────────────────────────────────────────
+    cusip:              h.cusip              ?? null,
+    issuer_cat:         h.issuer_cat         ?? null,
+    liquidity_class:    h.liquidity_class    ?? null,
+    fair_val_level:     h.fair_val_level     ?? null,
+    is_debt:            h.is_debt            ?? null,
+    debt_is_default:    h.debt_is_default    ?? null,
+    debt_in_arrears:    h.debt_in_arrears    ?? null,
+    debt_coupon_kind:   h.debt_coupon_kind   ?? null,
+    debt_annualized_rt: h.debt_annualized_rt ?? null,
+    debt_maturity_dt:   h.debt_maturity_dt   ?? null,
+    // ─────────────────────────────────────────────────────────────────────
+    cached_at:          now,
   }));
 
   // Batch insert in groups of 50.
@@ -332,8 +356,12 @@ export async function saveExpenseRatios(ratiosObject) {
 // ---------------------------------------------------------------------------
 
 /**
- * Returns a map of { TICKER: { nav, momentum, sharpe, riskAdj } } for the
- * given tickers. Rows older than 1 day are excluded.
+ * Returns a map of { TICKER: { nav, momentum, sharpe, riskAdj, rawData } }
+ * for the given tickers. Rows older than 1 day are excluded.
+ *
+ * A10: Now returns rawData (from raw_data column) so tiingo.js can restore
+ * dailyReturns from cache hits. Previously dailyReturns was always [] on
+ * cache hits because rawData was not included in the return value.
  */
 export async function getTiingoCache(tickers) {
   if (!tickers || tickers.length === 0) return {};
@@ -351,6 +379,7 @@ export async function getTiingoCache(tickers) {
       momentum: row.momentum ?? null,
       sharpe:   row.sharpe   ?? null,
       riskAdj:  row.risk_adj ?? null,
+      rawData:  row.raw_data ?? null,   // A10: dailyReturns JSON array
     };
   }
   return result;
