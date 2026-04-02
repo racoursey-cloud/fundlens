@@ -20,10 +20,10 @@
 // (FMP, EODHD, etc.) without changing the interface. The only export is
 // classifyHoldingSectors(holdingsMap) → holdingsMap with sectors filled in.
 //
-// ⚠️  CRITICAL: All Claude API calls must be SEQUENTIAL with 1.2s delays.
+// \u26a0\ufe0f  CRITICAL: All Claude API calls must be SEQUENTIAL with 1.2s delays.
 //     Never use Promise.all() for Claude calls. This has broken production 5+ times.
-// ⚠️  All Supabase calls route through supaFetch() from api.js.
-// ⚠️  No localStorage. No direct Supabase calls.
+// \u26a0\ufe0f  All Supabase calls route through supaFetch() from api.js.
+// \u26a0\ufe0f  No localStorage. No direct Supabase calls.
 
 import { callClaude, supaFetch } from '../services/api.js';
 import { CLAUDE_MODEL, GICS_SECTORS } from './constants.js';
@@ -65,6 +65,10 @@ function isStale(isoString) {
 /**
  * Reads cached sector classifications for a list of holding names.
  * Returns a Map<holdingName, sector> for all fresh (non-stale) entries.
+ *
+ * A13 fix: Each holding name is URL-encoded individually before being placed
+ * in the PostgREST IN() filter. Names containing &, (, ), /, etc. were
+ * breaking the query string (& interpreted as param separator → 400 errors).
  */
 async function getCachedSectors(holdingNames) {
   const cached = new Map();
@@ -73,7 +77,10 @@ async function getCachedSectors(holdingNames) {
   // PostgREST IN filter — batch in groups of 50 to avoid URL length limits
   for (let i = 0; i < holdingNames.length; i += 50) {
     const batch = holdingNames.slice(i, i + 50);
-    const inList = batch.map(n => `"${n.replace(/"/g, '\\"')}"`).join(',');
+
+    // URL-encode each holding name individually so special characters
+    // (&, commas, parens, slashes) don't break the query string.
+    const inList = batch.map(n => `"${encodeURIComponent(n.replace(/"/g, '\\"'))}"`).join(',');
 
     try {
       const rows = await supaFetch(
@@ -202,7 +209,7 @@ JSON only. No markdown fences. No explanation.`;
       // Validate sector is in our GICS list or is explicitly null
       if (sector === null || sector === 'null') continue; // skip non-GICS holdings
       if (!VALID_SECTORS.includes(sector)) {
-        console.warn(`[classify] invalid sector "${sector}" for "${item.name}" — skipping`);
+        console.warn(`[classify] invalid sector "${sector}" for "${item.name}" \u2014 skipping`);
         continue;
       }
 
@@ -239,7 +246,7 @@ JSON only. No markdown fences. No explanation.`;
 export async function classifyHoldingSectors(holdingsMap, onProgress) {
   if (!holdingsMap || typeof holdingsMap !== 'object') return holdingsMap ?? {};
 
-  // ── 1. Collect unique unclassified holding names ────────────────────────
+  // \u2500\u2500 1. Collect unique unclassified holding names \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
   const unclassifiedNames = new Set();
 
   for (const ticker of Object.keys(holdingsMap)) {
@@ -254,20 +261,20 @@ export async function classifyHoldingSectors(holdingsMap, onProgress) {
   }
 
   if (unclassifiedNames.size === 0) {
-    console.log('[classify] all holdings already have sectors — skipping');
+    console.log('[classify] all holdings already have sectors \u2014 skipping');
     return holdingsMap;
   }
 
   console.log(`[classify] ${unclassifiedNames.size} unique holdings need sector classification`);
 
-  // ── 2. Check sector_classifications cache ───────────────────────────────
+  // \u2500\u2500 2. Check sector_classifications cache \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
   const nameList = Array.from(unclassifiedNames);
   const cached = await getCachedSectors(nameList);
 
   const stillNeeded = nameList.filter(name => !cached.has(name));
   console.log(`[classify] ${cached.size} found in cache, ${stillNeeded.length} need Claude classification`);
 
-  // ── 3. Batch-classify uncached names via Claude Haiku ───────────────────
+  // \u2500\u2500 3. Batch-classify uncached names via Claude Haiku \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
   const newClassifications = new Map();
 
   if (stillNeeded.length > 0) {
@@ -290,14 +297,14 @@ export async function classifyHoldingSectors(holdingsMap, onProgress) {
         onProgress(classified, nameList.length);
       }
 
-      // Sequential delay between Claude calls (mandatory — plan line 470)
+      // Sequential delay between Claude calls (mandatory \u2014 plan line 470)
       if (b < totalBatches - 1) {
         await sleep(CLAUDE_DELAY_MS);
       }
     }
   }
 
-  // ── 4. Save new classifications to cache ────────────────────────────────
+  // \u2500\u2500 4. Save new classifications to cache \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
   if (newClassifications.size > 0) {
     const toSave = Array.from(newClassifications).map(([name, sector]) => ({
       holding_name: name,
@@ -308,7 +315,7 @@ export async function classifyHoldingSectors(holdingsMap, onProgress) {
     console.log(`[classify] saved ${toSave.length} new classifications to cache`);
   }
 
-  // ── 5. Apply sectors to all holdings ────────────────────────────────────
+  // \u2500\u2500 5. Apply sectors to all holdings \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
   // Merge cached + new into a single lookup
   const sectorLookup = new Map([...cached, ...newClassifications]);
 
