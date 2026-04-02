@@ -1,5 +1,5 @@
 // =============================================================================
-// FundLens v5 — src/components/portfolio/PortfolioTab.jsx
+// FundLens v5.1 — src/components/portfolio/PortfolioTab.jsx
 //
 // Primary output view. Sections:
 //   1. Allocation Recommendation — two SVG donut charts (sector + fund)
@@ -17,6 +17,7 @@ import {
   GICS_SECTORS,
   FACTOR_LABELS,
   FACTOR_KEYS,
+  getTierFromModZ,
 } from '../../engine/constants.js';
 
 // ---------------------------------------------------------------------------
@@ -66,19 +67,26 @@ function buildDonutSegments(data) {
 /**
  * Aggregates sector exposure across allocated funds.
  * Returns [{ label, value (0–1), color }] sorted descending.
+ *
+ * v5.1: fund.allocation_pct is 0–1 decimal (e.g. 0.25 = 25%).
+ * holdingsMap values may be { holdings: [...], meta } or a flat array.
  */
 function computeSectorExposure(funds, holdingsMap) {
   const totals = {};
   let grand    = 0;
 
   for (const fund of funds) {
-    if (!fund.allocPct || fund.allocPct <= 0) continue;
-    const holdings = holdingsMap[fund.ticker] || [];
+    if (!fund.allocation_pct || fund.allocation_pct <= 0) continue;
+
+    // Safe access: holdingsMap entry may be { holdings, meta } or a flat array
+    const raw      = holdingsMap[fund.ticker];
+    const holdings = Array.isArray(raw) ? raw : (raw?.holdings || []);
+
     for (const h of holdings) {
       const sector = h.sector || h.gics_sector || h.sectorName;
       if (!sector) continue;
-      const w = (h.weight || 0);                    // assume 0–100 scale
-      const contribution = (w / 100) * fund.allocPct; // convert both to fraction space
+      const w = (h.weight || 0);                              // 0–100 scale
+      const contribution = (w / 100) * fund.allocation_pct;   // both in fraction space
       totals[sector] = (totals[sector] || 0) + contribution;
       grand          += contribution;
     }
@@ -183,9 +191,18 @@ function DonutChart({ data, centerLine1, centerLine2 }) {
   );
 }
 
-/** Tier badge — coloured border + background, uppercase label. */
+/**
+ * Tier badge — coloured border + background, uppercase label.
+ * v5.1: tier is a string ('BREAKAWAY', 'STRONG', etc.) or a modZ number.
+ * We resolve it to { label, color } via getTierFromModZ from constants.js.
+ */
 function TierBadge({ tier }) {
-  if (!tier) return null;
+  if (tier == null) return null;
+
+  // Resolve string/number tier to { label, color } object
+  const resolved = getTierFromModZ(tier);
+  if (!resolved) return null;
+
   return (
     <span style={{
       display:       'inline-block',
@@ -194,17 +211,17 @@ function TierBadge({ tier }) {
       fontSize:      '10px',
       fontWeight:    '700',
       letterSpacing: '0.06em',
-      color:         tier.color,
-      border:        `1px solid ${tier.color}50`,
-      background:    `${tier.color}1a`,
+      color:         resolved.color,
+      border:        `1px solid ${resolved.color}50`,
+      background:    `${resolved.color}1a`,
       whiteSpace:    'nowrap',
     }}>
-      {tier.label}
+      {resolved.label}
     </span>
   );
 }
 
-/** 4-factor mini-bar strip used inside fund table rows. */
+/** 3-factor mini-bar strip used inside fund table rows. */
 function FactorBars({ fund }) {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: '3px' }}>
@@ -322,14 +339,14 @@ export default function PortfolioTab() {
   );
 
   const allocatedFunds = useMemo(
-    () => funds.filter(f => f.allocPct > 0),
+    () => funds.filter(f => f.allocation_pct > 0),
     [funds]
   );
 
   const fundDonutData = useMemo(
     () => allocatedFunds.map((f, i) => ({
       label: f.ticker,
-      value: f.allocPct,
+      value: f.allocation_pct,
       color: fundColor(i),
     })),
     [allocatedFunds]
@@ -353,10 +370,10 @@ export default function PortfolioTab() {
     let nw = { ...weights, [key]: val };
 
     if (otherSum === 0) {
-      // Distribute remaining equally across the other three
-      const each = Math.floor(remaining / 3);
+      // Distribute remaining equally across the other keys
+      const each = Math.floor(remaining / others.length);
       others.forEach(k => { nw[k] = each; });
-      nw[others[0]] += remaining - each * 3;  // absorb rounding to first
+      nw[others[0]] += remaining - each * others.length;  // absorb rounding to first
     } else {
       // Scale proportionally
       others.forEach(k => {
@@ -457,7 +474,7 @@ export default function PortfolioTab() {
                 <div style={{ flexShrink: 0 }}>
                   <DonutChart
                     data={sectorData}
-                    centerLine1={sectorData.length > 0 ? sectorData.length : '—'}
+                    centerLine1={sectorData.length > 0 ? sectorData.length : '\u2014'}
                     centerLine2={sectorData.length === 1 ? 'sector' : 'sectors'}
                   />
                 </div>
@@ -532,7 +549,7 @@ export default function PortfolioTab() {
                             fontSize: '12px', fontWeight: '600', color: '#f1f5f9',
                             fontFamily: 'JetBrains Mono, monospace', flexShrink: 0,
                           }}>
-                            {f.allocPct.toFixed(1)}%
+                            {(f.allocation_pct * 100).toFixed(1)}%
                           </span>
                         </div>
                       ))}
@@ -580,7 +597,7 @@ export default function PortfolioTab() {
 
             {sortedFunds.map((fund, idx) => {
               const isSel    = selectedFund === fund.ticker;
-              const hasAlloc = fund.allocPct > 0;
+              const hasAlloc = fund.allocation_pct > 0;
               const showBars = isLive && !fund.isMoneyMarket;
 
               return (
@@ -653,7 +670,7 @@ export default function PortfolioTab() {
                     <TierBadge tier={fund.tier} />
                   </div>
 
-                  {/* Alloc % */}
+                  {/* Alloc % — v5.1: allocation_pct is 0–1 decimal */}
                   <span style={{
                     fontSize:   '13px',
                     fontWeight: hasAlloc ? '700' : '400',
@@ -661,7 +678,7 @@ export default function PortfolioTab() {
                     textAlign:  'right',
                     fontFamily: 'JetBrains Mono, monospace',
                   }}>
-                    {hasAlloc ? `${fund.allocPct.toFixed(1)}%` : '—'}
+                    {hasAlloc ? `${(fund.allocation_pct * 100).toFixed(1)}%` : '\u2014'}
                   </span>
 
                   {/* Factor bars */}
@@ -669,7 +686,7 @@ export default function PortfolioTab() {
                     {showBars ? (
                       <FactorBars fund={fund} />
                     ) : (
-                      <span style={{ fontSize: '11px', color: '#374151' }}>—</span>
+                      <span style={{ fontSize: '11px', color: '#374151' }}>\u2014</span>
                     )}
                   </div>
                 </div>
