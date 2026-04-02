@@ -122,13 +122,16 @@ async function loadCIKMap() {
     const json = await res.json();
 
     // ── Format A: { fields: [...], data: [[...], ...] } ──────────────────
+    // company_tickers_mf.json uses: ["cik", "seriesId", "classId", "symbol"]
+    // company_tickers.json uses:    ["cik_str", "ticker", "title"]
+    // Support both by trying MF field names first, then standard.
     if (Array.isArray(json.fields) && Array.isArray(json.data)) {
       const fields = json.fields.map(f => String(f).toLowerCase());
-      const cikIdx    = fields.indexOf('cik_str');
-      const tickerIdx = fields.indexOf('ticker');
+      const cikIdx    = fields.indexOf('cik') !== -1 ? fields.indexOf('cik') : fields.indexOf('cik_str');
+      const tickerIdx = fields.indexOf('symbol') !== -1 ? fields.indexOf('symbol') : fields.indexOf('ticker');
 
       if (cikIdx === -1 || tickerIdx === -1) {
-        console.warn('[edgar] CIK map fields missing cik_str or ticker:', fields);
+        console.warn('[edgar] CIK map fields missing cik/cik_str or symbol/ticker:', fields);
       } else {
         for (const row of json.data) {
           if (!Array.isArray(row)) continue;
@@ -149,7 +152,7 @@ async function loadCIKMap() {
     if (typeof json === 'object' && json !== null) {
       for (const entry of Object.values(json)) {
         const cik    = entry.cik_str ?? entry.cik;
-        const ticker = entry.ticker;
+        const ticker = entry.ticker  ?? entry.symbol;
         if (cik != null && ticker) {
           map.set(String(ticker).toUpperCase(), String(cik));
         }
