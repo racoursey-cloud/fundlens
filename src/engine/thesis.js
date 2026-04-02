@@ -1,5 +1,5 @@
 // =============================================================================
-// FundLens v5 — src/engine/thesis.js
+// FundLens v5.1 — src/engine/thesis.js
 // Claude thesis generation + GICS sector scoring.
 //
 // Single Claude call produces:
@@ -25,7 +25,7 @@
 //   - All Claude calls route through callClaude() → /api/claude.
 // =============================================================================
 
-import { CLAUDE_MODEL, GICS_SECTORS } from './constants.js';
+import { SONNET_MODEL, GICS_SECTORS } from './constants.js';
 import { callClaude }                  from '../services/api.js';
 
 // ---------------------------------------------------------------------------
@@ -265,7 +265,7 @@ async function callWithRetry(prompt) {
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     try {
       const response = await callClaude({
-        model:      CLAUDE_MODEL,
+        model:      SONNET_MODEL,
         max_tokens: 3000,
         system:     'You are a quantitative portfolio strategist. You write with conviction and precision. Your analysis is data-driven and actionable.',
         messages:   [{ role: 'user', content: prompt }],
@@ -361,7 +361,7 @@ export async function generateThesis(worldData = {}) {
 
   try {
     const response = await callClaude({
-      model:      CLAUDE_MODEL,
+      model:      SONNET_MODEL,
       max_tokens: 3000,
       system:     'You are a quantitative portfolio strategist.',
       messages:   [{ role: 'user', content: fallbackPrompt }],
