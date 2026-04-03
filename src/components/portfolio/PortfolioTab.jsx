@@ -11,12 +11,13 @@
 // All SVG — no charting library.
 // =============================================================================
 
-import { useMemo, useCallback } from 'react';
+import { useMemo, useCallback, useState, useEffect } from 'react';
 import useAppStore from '../../store/useAppStore.js';
 import {
   GICS_SECTORS,
   FACTOR_LABELS,
   FACTOR_KEYS,
+  DEFAULT_WEIGHTS,
   getTierFromModZ,
 } from '../../engine/constants.js';
 
@@ -320,7 +321,7 @@ export default function PortfolioTab() {
     funds,
     holdingsMap,
     investorLetter,
-    weights,
+    weights: storeWeights,
     riskTolerance,
     source,
     isRunning,
@@ -330,6 +331,16 @@ export default function PortfolioTab() {
     rescoreLocal,
     setRiskTolerance,
   } = useAppStore();
+
+  // ── Draft weights (local state for independent slider movement) ──────────
+  // Sliders update draftWeights freely. Rescoring only happens when total = 100.
+
+  const [draftWeights, setDraftWeights] = useState(storeWeights);
+
+  // Sync draft ← store when store weights change externally (pipeline run, page load).
+  useEffect(() => {
+    setDraftWeights(storeWeights);
+  }, [storeWeights]);
 
   // ── Derived data ──────────────────────────────────────────────────────────
 
@@ -357,39 +368,27 @@ export default function PortfolioTab() {
     [funds]
   );
 
-  const weightTotal = FACTOR_KEYS.reduce((s, k) => s + (weights[k] ?? 0), 0);
+  const weightTotal  = FACTOR_KEYS.reduce((s, k) => s + (draftWeights[k] ?? 0), 0);
+  const weightsValid = weightTotal === 100;
 
-  // ── Weight slider handler ─────────────────────────────────────────────────
+  // ── Weight slider handler (independent — moves only the touched slider) ──
 
   const handleWeightChange = useCallback((key, rawValue) => {
-    const val       = Math.max(0, Math.min(60, parseInt(rawValue, 10)));
-    const others    = FACTOR_KEYS.filter(k => k !== key);
-    const otherSum  = others.reduce((s, k) => s + (weights[k] ?? 0), 0);
-    const remaining = 100 - val;
+    const val = Math.max(0, Math.min(60, parseInt(rawValue, 10)));
+    const nw  = { ...draftWeights, [key]: val };
+    setDraftWeights(nw);
 
-    let nw = { ...weights, [key]: val };
-
-    if (otherSum === 0) {
-      // Distribute remaining equally across the other keys
-      const each = Math.floor(remaining / others.length);
-      others.forEach(k => { nw[k] = each; });
-      nw[others[0]] += remaining - each * others.length;  // absorb rounding to first
-    } else {
-      // Scale proportionally
-      others.forEach(k => {
-        nw[k] = Math.round(((weights[k] ?? 0) / otherSum) * remaining);
-      });
-      // Fix any rounding error on the largest other key
-      const sum  = FACTOR_KEYS.reduce((s, k) => s + nw[k], 0);
-      const diff = 100 - sum;
-      if (diff !== 0) {
-        const largest = others.reduce((a, b) => nw[a] >= nw[b] ? a : b);
-        nw[largest]  += diff;
-      }
+    // Auto-rescore when total hits exactly 100.
+    const total = FACTOR_KEYS.reduce((s, k) => s + (nw[k] ?? 0), 0);
+    if (total === 100) {
+      rescoreLocal(nw);
     }
+  }, [draftWeights, rescoreLocal]);
 
-    rescoreLocal(nw);
-  }, [weights, rescoreLocal]);
+  const handleResetWeights = useCallback(() => {
+    setDraftWeights({ ...DEFAULT_WEIGHTS });
+    rescoreLocal({ ...DEFAULT_WEIGHTS });
+  }, [rescoreLocal]);
 
   // ── Empty state ───────────────────────────────────────────────────────────
 
@@ -712,15 +711,51 @@ export default function PortfolioTab() {
               <div style={{ display: 'flex', justifyContent: 'space-between',
                 alignItems: 'center', marginBottom: '20px' }}>
                 <div style={cardLabel}>Factor Weights</div>
-                <span style={{
-                  fontSize:   '11px',
-                  fontWeight: '700',
-                  color:      weightTotal === 100 ? '#10b981' : '#ef4444',
-                  fontFamily: 'JetBrains Mono, monospace',
-                }}>
-                  Total: {weightTotal}%
-                </span>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                  <button
+                    onClick={handleResetWeights}
+                    style={{
+                      padding:      '3px 10px',
+                      fontSize:     '10px',
+                      fontWeight:   '600',
+                      color:        '#6b7280',
+                      background:   'transparent',
+                      border:       '1px solid #25282e',
+                      borderRadius: '4px',
+                      cursor:       'pointer',
+                      fontFamily:   'Inter, sans-serif',
+                      transition:   'color 0.15s, border-color 0.15s',
+                    }}
+                    onMouseEnter={e => { e.currentTarget.style.color = '#94a3b8'; e.currentTarget.style.borderColor = '#3b82f6'; }}
+                    onMouseLeave={e => { e.currentTarget.style.color = '#6b7280'; e.currentTarget.style.borderColor = '#25282e'; }}
+                  >
+                    Reset
+                  </button>
+                  <span style={{
+                    fontSize:   '11px',
+                    fontWeight: '700',
+                    color:      weightsValid ? '#10b981' : '#ef4444',
+                    fontFamily: 'JetBrains Mono, monospace',
+                  }}>
+                    Total: {weightTotal}%
+                  </span>
+                </div>
               </div>
+
+              {!weightsValid && (
+                <div style={{
+                  padding:      '8px 12px',
+                  marginBottom: '16px',
+                  background:   '#ef44441a',
+                  border:       '1px solid #ef444450',
+                  borderRadius: '6px',
+                  fontSize:     '11px',
+                  color:        '#fca5a5',
+                  lineHeight:   '1.5',
+                }}>
+                  Weights must total 100% to apply. Adjust sliders or hit Reset.
+                </div>
+              )}
 
               <div style={{ display: 'flex', flexDirection: 'column', gap: '18px' }}>
                 {FACTOR_KEYS.map(key => (
@@ -736,7 +771,7 @@ export default function PortfolioTab() {
                         color:      '#f1f5f9',
                         fontFamily: 'JetBrains Mono, monospace',
                       }}>
-                        {weights[key] ?? 0}%
+                        {draftWeights[key] ?? 0}%
                       </span>
                     </div>
                     <input
@@ -744,7 +779,7 @@ export default function PortfolioTab() {
                       min="0"
                       max="60"
                       step="1"
-                      value={weights[key] ?? 0}
+                      value={draftWeights[key] ?? 0}
                       onChange={e => handleWeightChange(key, e.target.value)}
                       className="fl-slider"
                     />
