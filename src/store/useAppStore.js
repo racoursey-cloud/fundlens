@@ -79,11 +79,20 @@ function buildSeedFunds(fundList) {
 function normaliseWeights(row) {
   if (!row) return { ...DEFAULT_WEIGHTS };
 
-  return {
+  const w = {
     sectorAlignment: row.sectorAlignment ?? row.sector_alignment ?? DEFAULT_WEIGHTS.sectorAlignment,
     momentum:        row.momentum        ?? DEFAULT_WEIGHTS.momentum,
     holdingsQuality: row.holdingsQuality ?? row.holdings_quality ?? DEFAULT_WEIGHTS.holdingsQuality,
   };
+
+  // Guard: if weights don't sum to 100 (e.g. stale v4 momentum=25), reset to defaults.
+  const sum = w.sectorAlignment + w.momentum + w.holdingsQuality;
+  if (sum !== 100) {
+    console.warn(`[store] normaliseWeights: sum=${sum}, expected 100 — resetting to defaults`);
+    return { ...DEFAULT_WEIGHTS };
+  }
+
+  return w;
 }
 
 // ---------------------------------------------------------------------------
