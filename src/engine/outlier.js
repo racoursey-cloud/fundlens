@@ -4,16 +4,18 @@
 //
 // Steps:
 //   1. Modified Z-Score on composite scores (money market excluded)
-//   2. Quality gates: below-median (modZ < 0) or low-data (≥4 fallbacks) → 0%
-//   3. Exponential allocation: k = 0.1 + (riskTolerance × 0.20), weight = e^(k × Z)
-//   4. 30% per-fund hard cap with proportional redistribution
+//      Quality gates: below-median (modZ < 0) or low-data (≥4 fallbacks) → 0%
+//   2. Exponential allocation: k = 0.1 + (riskTolerance × 0.20), weight = e^(k × Z)
+//   3. 30% per-fund hard cap with proportional redistribution
+//   4. Capture threshold: walk ranked allocations until cumulative weight
+//      hits a risk-scaled target, trim the tail, re-normalize to 100%
 //   5. Round to 1 decimal, absorb rounding error into largest holding
 //
 // No Claude calls. No external API calls. Pure math.
 // Concentration penalty is already applied in scoring.js — not recalculated here.
 // =============================================================================
 
-import { CONCENTRATION, MONEY_MARKET_TICKERS, getTierFromModZ } from './constants.js';
+import { ALLOCATION_LIMITS, MONEY_MARKET_TICKERS, getTierFromModZ } from './constants.js';
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -140,7 +142,44 @@ export function computeAllocations(scoredFunds, riskTolerance) {
     }
   }
 
-  // ── STEP 4 — Rounding Cleanup ─────────────────────────────────────────────
+  // ── STEP 4 — Capture Threshold (risk-scaled fund count) ─────────────────
+  // Walk down ranked allocations until cumulative weight hits a risk-scaled
+  // target. Trim the tail, then re-normalize survivors to 100%.
+  // Fund count is data-driven (responds to score distribution shape) but
+  // clamped to [minFunds, maxFunds] guardrails.
+  const { captureHigh, captureStep, minFunds, maxFunds } = ALLOCATION_LIMITS;
+  const targetCapture = captureHigh - (rt - 1) * captureStep;
+
+  const ranked = Object.entries(allocMap)
+    .sort(([, a], [, b]) => b - a);
+
+  let cumulative = 0;
+  let keepCount  = 0;
+
+  for (const [, alloc] of ranked) {
+    if (keepCount >= maxFunds) break;
+    cumulative += alloc;
+    keepCount++;
+    if (cumulative >= targetCapture && keepCount >= minFunds) break;
+  }
+
+  // Clamp to guardrails, and never exceed how many we actually have
+  keepCount = Math.max(minFunds, Math.min(maxFunds, keepCount));
+  keepCount = Math.min(keepCount, ranked.length);
+
+  // Remove trimmed funds from allocMap
+  const kept = new Set(ranked.slice(0, keepCount).map(([t]) => t));
+  for (const ticker of Object.keys(allocMap)) {
+    if (!kept.has(ticker)) delete allocMap[ticker];
+  }
+
+  // Re-normalize survivors to 100%
+  const keptSum = Object.values(allocMap).reduce((a, b) => a + b, 0) || 1;
+  for (const ticker of Object.keys(allocMap)) {
+    allocMap[ticker] = (allocMap[ticker] / keptSum) * 100;
+  }
+
+  // ── STEP 5 — Rounding Cleanup ─────────────────────────────────────────────
   // Round each position to 1 decimal place.
   for (const ticker of Object.keys(allocMap)) {
     allocMap[ticker] = parseFloat(allocMap[ticker].toFixed(1));
@@ -158,7 +197,7 @@ export function computeAllocations(scoredFunds, riskTolerance) {
     }
   }
 
-  // ── STEP 5 — Assemble Return Shape ────────────────────────────────────────
+  // ── STEP 6 — Assemble Return Shape ────────────────────────────────────────
   // { ticker, allocation_pct (0–1 decimal), tier (string), modZ, composite }
   // Sorted by allocation_pct descending. Non-allocated funds have allocation_pct = 0.
   const result = withZ.map(fund => {
