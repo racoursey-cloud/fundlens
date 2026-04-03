@@ -7,7 +7,7 @@
 
 import { useMemo } from 'react';
 import useAppStore from '../../store/useAppStore.js';
-import { GICS_SECTORS, FACTOR_LABELS, FACTOR_KEYS } from '../../engine/constants.js';
+import { GICS_SECTORS, FACTOR_LABELS, FACTOR_KEYS, getTierFromModZ } from '../../engine/constants.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -518,10 +518,11 @@ function FactorBars({ fund }) {
 }
 
 function TierBadge({ tier }) {
-  if (!tier) return null;
-  const { label, color } = tier;
+  if (tier == null) return null;
+  const resolved = getTierFromModZ(tier);
+  if (!resolved) return null;
 
-  if (label === 'MM') {
+  if (resolved.label === 'MM') {
     return (
       <span
         style={{
@@ -546,14 +547,14 @@ function TierBadge({ tier }) {
         fontSize:      '10px',
         fontWeight:    700,
         letterSpacing: '0.07em',
-        color,
-        background:    `${color}18`,
-        border:        `1px solid ${color}40`,
+        color:         resolved.color,
+        background:    `${resolved.color}18`,
+        border:        `1px solid ${resolved.color}40`,
         fontFamily:    '"JetBrains Mono", monospace',
         whiteSpace:    'nowrap',
       }}
     >
-      {label}
+      {resolved.label}
     </span>
   );
 }
@@ -684,7 +685,7 @@ function FundRankingsTable({ funds, selectedFund, selectFund }) {
 
               {/* Tier */}
               <div>
-                <TierBadge tier={fund.tier} />
+                <TierBadge tier={fund.modZ} />
               </div>
 
               {/* Factor bars */}
