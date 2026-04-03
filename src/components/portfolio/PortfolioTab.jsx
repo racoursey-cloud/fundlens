@@ -134,6 +134,15 @@ function formatLetter(text) {
 /** SVG donut ring chart. `data` is [{label, value, color}]. */
 function DonutChart({ data, centerLine1, centerLine2 }) {
   const segments = buildDonutSegments(data);
+  const [hovered, setHovered] = useState(null);
+
+  // When hovered, show segment label + pct in center; otherwise show defaults.
+  const displayLine1 = hovered != null
+    ? (segments[hovered]?.fraction * 100).toFixed(1) + '%'
+    : centerLine1;
+  const displayLine2 = hovered != null
+    ? segments[hovered]?.label ?? ''
+    : centerLine2;
 
   return (
     <svg width="200" height="200" viewBox="0 0 200 200" aria-hidden="true">
@@ -164,6 +173,10 @@ function DonutChart({ data, centerLine1, centerLine2 }) {
             strokeDasharray={`${seg.dashLen} ${DCIRC}`}
             strokeDashoffset={seg.offset}
             strokeLinecap="butt"
+            opacity={hovered != null && hovered !== i ? 0.35 : 1}
+            style={{ transition: 'opacity 0.15s ease', cursor: 'pointer' }}
+            onMouseEnter={() => setHovered(i)}
+            onMouseLeave={() => setHovered(null)}
           />
         ))}
       </g>
@@ -173,20 +186,21 @@ function DonutChart({ data, centerLine1, centerLine2 }) {
         x="100" y="92"
         textAnchor="middle"
         fill={segments.length > 0 ? '#f1f5f9' : '#4b5563'}
-        fontSize="28"
+        fontSize={hovered != null ? '24' : '28'}
         fontWeight="700"
         fontFamily="Inter, sans-serif"
+        style={{ transition: 'font-size 0.15s ease' }}
       >
-        {centerLine1}
+        {displayLine1}
       </text>
       <text
         x="100" y="116"
         textAnchor="middle"
-        fill="#6b7280"
+        fill={hovered != null ? '#94a3b8' : '#6b7280'}
         fontSize="11"
         fontFamily="Inter, sans-serif"
       >
-        {centerLine2}
+        {displayLine2}
       </text>
     </svg>
   );
@@ -194,8 +208,7 @@ function DonutChart({ data, centerLine1, centerLine2 }) {
 
 /**
  * Tier badge — coloured border + background, uppercase label.
- * v5.1: tier is a string ('BREAKAWAY', 'STRONG', etc.) or a modZ number.
- * We resolve it to { label, color } via getTierFromModZ from constants.js.
+ * Receives fund.modZ (number) and resolves to { label, color } via getTierFromModZ.
  */
 function TierBadge({ tier }) {
   if (tier == null) return null;
@@ -666,7 +679,7 @@ export default function PortfolioTab() {
 
                   {/* Tier badge */}
                   <div style={{ textAlign: 'center' }}>
-                    <TierBadge tier={fund.tier} />
+                    <TierBadge tier={fund.modZ} />
                   </div>
 
                   {/* Alloc % — v5.1: allocation_pct is 0–1 decimal */}
