@@ -1,7 +1,7 @@
 // =============================================================================
-// FundLens v5 — src/components/shared/FundDetailSidebar.jsx
+// FundLens v5.1 — src/components/shared/FundDetailSidebar.jsx
 // Slide-in panel (right → 0) showing full detail for selectedFund.
-// Sections: composite + factor bars · sector donut · mandate + manager reasoning.
+// Sections: composite + factor bars · sector donut.
 // =============================================================================
 
 import { useState, useEffect, useMemo } from 'react';
@@ -60,15 +60,16 @@ function slicePath(cx, cy, outerR, innerR, startDeg, endDeg) {
 // ---------------------------------------------------------------------------
 
 function TierBadge({ tier }) {
-  if (!tier) return null;
-  const { label, color } = tier;
+  if (tier == null) return null;
+  const resolved = getTierFromModZ(tier);
+  if (!resolved) return null;
   return (
     <span
       style={{
         display: 'inline-block',
-        background: color + '22',
-        color,
-        border: `1px solid ${color}55`,
+        background: resolved.color + '22',
+        color: resolved.color,
+        border: `1px solid ${resolved.color}55`,
         borderRadius: 4,
         padding: '2px 8px',
         fontSize: 10,
@@ -78,7 +79,7 @@ function TierBadge({ tier }) {
         fontFamily: 'JetBrains Mono, monospace',
       }}
     >
-      {label}
+      {resolved.label}
     </span>
   );
 }
@@ -123,35 +124,6 @@ function FactorBar({ label, score }) {
             transition: 'width 400ms ease',
           }}
         />
-      </div>
-    </div>
-  );
-}
-
-function ReasoningBlock({ title, text }) {
-  return (
-    <div style={{ marginBottom: 24 }}>
-      <div
-        style={{
-          fontSize: 11,
-          fontWeight: 700,
-          textTransform: 'uppercase',
-          letterSpacing: '0.1em',
-          color: '#6b7280',
-          marginBottom: 10,
-        }}
-      >
-        {title}
-      </div>
-      <div
-        style={{
-          fontSize: 13,
-          color: text ? '#d1d5db' : '#4b5563',
-          lineHeight: 1.65,
-          fontStyle: text ? 'normal' : 'italic',
-        }}
-      >
-        {text ?? 'Reasoning not available'}
       </div>
     </div>
   );
@@ -372,8 +344,6 @@ export default function FundDetailSidebar() {
     selectedFund,
     funds,
     holdingsMap,
-    mandateScores,
-    managerScores,
     selectFund,
   } = useAppStore();
 
@@ -389,9 +359,8 @@ export default function FundDetailSidebar() {
   const fund = funds.find(f => f.ticker === selectedFund);
   if (!fund) return null;
 
-  const holdings = holdingsMap[selectedFund] ?? [];
-
-  const tier = fund.tier ?? getTierFromModZ(fund.modZ ?? 0);
+  const rawHoldings = holdingsMap[selectedFund];
+  const holdings = Array.isArray(rawHoldings) ? rawHoldings : (rawHoldings?.holdings || []);
 
   const modZDisplay = (() => {
     if (fund.modZ == null) return '—';
@@ -400,12 +369,9 @@ export default function FundDetailSidebar() {
   })();
 
   const allocDisplay =
-    fund.allocPct > 0
-      ? `${fund.allocPct.toFixed(1)}% allocation`
+    fund.allocation_pct > 0
+      ? `${(fund.allocation_pct * 100).toFixed(1)}% allocation`
       : 'Not allocated';
-
-  const mandateReasoning = mandateScores?.[selectedFund]?.reasoning ?? null;
-  const managerReasoning = managerScores?.[selectedFund]?.reasoning  ?? null;
 
   const hasPenalty  = fund.concentrationPenalty != null && fund.concentrationPenalty !== 0;
   const hasExpMod   = fund.expenseModifier      != null && fund.expenseModifier      !== 0;
@@ -527,7 +493,7 @@ export default function FundDetailSidebar() {
                 {(fund.composite ?? 5.0).toFixed(1)}
               </div>
               <div style={{ paddingBottom: 3 }}>
-                <TierBadge tier={tier} />
+                <TierBadge tier={fund.modZ} />
               </div>
             </div>
 
@@ -626,19 +592,6 @@ export default function FundDetailSidebar() {
             )}
           </div>
 
-          <PanelDivider />
-
-          {/* ════════════════════════════════════════════════════════════════
-              BOTTOM SECTION — AI Reasoning
-          ════════════════════════════════════════════════════════════════ */}
-          <ReasoningBlock
-            title="Macro Fit Analysis"
-            text={mandateReasoning}
-          />
-          <ReasoningBlock
-            title="Management Quality"
-            text={managerReasoning}
-          />
         </div>
       </div>
     </>
