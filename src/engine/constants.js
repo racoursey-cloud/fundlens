@@ -151,6 +151,28 @@ export const CONCENTRATION = {
 };
 
 // ---------------------------------------------------------------------------
+// Allocation Limits — capture-threshold fund count control
+// After exponential weighting and 30% cap, walk down ranked allocations
+// until cumulative weight hits a risk-scaled target. Guardrails clamp
+// the fund count to [minFunds, maxFunds].
+//
+// Research basis:
+//   O'Neal 1997 — 4 funds halves terminal wealth dispersion
+//   Cuthbertson 2022 — alpha declines monotonically as portfolio size grows
+//   DiVA 2025 — 2–6 optimal for risk-averse, 1–2 for risk-aggressive
+// ---------------------------------------------------------------------------
+
+export const ALLOCATION_LIMITS = {
+  captureHigh:  65,   // cumulative weight target (%) at risk 1
+  captureStep:   3,   // target drops by this per risk notch
+  minFunds:      3,   // hard floor — never fewer than 3
+  maxFunds:      7,   // hard ceiling — never more than 7
+  // risk 1 → target 65%  →  ~7 funds (flat curve, each ~9%)
+  // risk 5 → target 53%  →  ~5 funds (moderate curve)
+  // risk 9 → target 41%  →  ~3 funds (steep curve, top 3 ≈ 52%)
+};
+
+// ---------------------------------------------------------------------------
 // Tier Classification — Modified Z-Score thresholds
 // ---------------------------------------------------------------------------
 
