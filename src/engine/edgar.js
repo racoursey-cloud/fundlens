@@ -11,6 +11,11 @@
 //     Pipeline.js (A9) must consume this shape. Cached results return meta: null
 //     until cache.js is updated (A10) to persist fund-level meta.
 //
+// A15 Phase 2: Added fetchSingleFundHoldings() for look-through scoring.
+//   quality.js calls this when a fund-of-funds holding (asset_type RF or
+//   _is_underlying_fund) needs its underlying holdings fetched and scored.
+//   Includes cache check/save matching fetchAllHoldings() behavior.
+//
 // NOTE — fields NOT available in NPORT-P XML (pre-work spot-check, April 2026):
 //   - Per-holding credit ratings (AAA/BBB/etc): NOT a standard NPORT field.
 //     quality.js (A4) uses issuerCat + isDefault + fairValLevel as proxies.
@@ -800,7 +805,7 @@ async function fetchHoldingsForTicker(ticker, cikMap) {
 }
 
 // ---------------------------------------------------------------------------
-// Public export
+// Public exports
 // ---------------------------------------------------------------------------
 
 /**
@@ -897,4 +902,50 @@ export async function fetchAllHoldings(fundTickers, onProgress) {
   }
 
   return results;
+}
+
+/**
+ * Fetches NPORT-P holdings for a single arbitrary ticker.
+ * Used by quality.js for fund-of-funds look-through scoring (A15 Phase 2).
+ *
+ * Same behavior as the per-ticker path in fetchAllHoldings():
+ *   - Checks Supabase holdings_cache first (15-day TTL)
+ *   - Falls back to live SEC fetch
+ *   - Saves new holdings to cache for future runs
+ *
+ * @param {string} ticker — Fund ticker (e.g. "EVSRX")
+ * @returns {Promise<{ holdings: Array, meta: Object|null }>}
+ */
+export async function fetchSingleFundHoldings(ticker) {
+  // ── Cache check ──────────────────────────────────────────────────────────
+  try {
+    const cached = await getHoldings(ticker);
+    if (cached && cached.length > 0) {
+      console.log(`[edgar] ${ticker} (look-through) — ${cached.length} holdings from cache`);
+      return { holdings: cached, meta: null };
+    }
+  } catch (err) {
+    console.warn(`[edgar] ${ticker} look-through cache error:`, err.message);
+  }
+
+  // ── Live SEC fetch ───────────────────────────────────────────────────────
+  const cikMap = await loadCIKMap();
+  let result = { holdings: [], meta: null };
+
+  try {
+    result = await fetchHoldingsForTicker(ticker, cikMap);
+  } catch (err) {
+    console.warn(`[edgar] ${ticker} (look-through) unexpected error:`, err.message);
+  }
+
+  // ── Save to cache ────────────────────────────────────────────────────────
+  if (result.holdings.length > 0) {
+    try {
+      await saveHoldings(ticker, result.holdings);
+    } catch (err) {
+      console.warn(`[edgar] ${ticker} look-through cache save error:`, err.message);
+    }
+  }
+
+  return result;
 }
