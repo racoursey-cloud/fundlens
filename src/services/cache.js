@@ -21,6 +21,7 @@
 //     debt_in_arrears, debt_coupon_kind, debt_annualized_rt, debt_maturity_dt.
 
 import { supaFetch } from './api.js';
+import { DEFAULT_WEIGHTS } from '../engine/constants.js';
 
 // ---------------------------------------------------------------------------
 // Internal TTL helpers
@@ -488,9 +489,9 @@ export async function saveUserWeights(userId, weights) {
   // PostgREST rejects unknown column names with 400, so we must use exact DB names.
   const row = {
     user_id:           userId,
-    sector_alignment:  weights.sectorAlignment  ?? weights.sector_alignment  ?? 40,
-    momentum:          weights.momentum          ?? 30,
-    holdings_quality:  weights.holdingsQuality   ?? weights.holdings_quality  ?? 30,
+    sector_alignment:  weights.sectorAlignment  ?? weights.sector_alignment  ?? DEFAULT_WEIGHTS.sectorAlignment,
+    momentum:          weights.momentum          ?? DEFAULT_WEIGHTS.momentum,
+    holdings_quality:  weights.holdingsQuality   ?? weights.holdings_quality  ?? DEFAULT_WEIGHTS.holdingsQuality,
     risk_tolerance:    weights.risk_tolerance     ?? weights.riskTolerance     ?? 5,
   };
 
