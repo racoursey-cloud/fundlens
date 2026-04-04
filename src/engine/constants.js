@@ -66,12 +66,16 @@ export const GICS_SECTORS = {
 
 // ---------------------------------------------------------------------------
 // Scoring Weights (must sum to 100)
+// Information-ratio justified (Jegadeesh & Titman 1993, Novy-Marx 2013):
+//   Momentum — strongest empirical premium, most persistent factor
+//   Quality  — fundamental data, meaningful and data-driven premium
+//   Positioning — tactical sector view, lowest documented reliability
 // ---------------------------------------------------------------------------
 
 export const DEFAULT_WEIGHTS = {
-  sectorAlignment:  40,
-  momentum:         30,
-  holdingsQuality:  30,
+  sectorAlignment:  25,
+  momentum:         40,
+  holdingsQuality:  35,
 };
 
 // ---------------------------------------------------------------------------
@@ -148,6 +152,18 @@ export const CONCENTRATION = {
   // risk_tolerance=1 (Diversified)   → multiplier = 1.500 (strongest penalty)
   // risk_tolerance=5 (balanced)      → multiplier = 1.000 (neutral)
   // risk_tolerance=9 (Concentrated)  → multiplier = 0.500 (weakest penalty)
+};
+
+// ---------------------------------------------------------------------------
+// Quality Confidence Scaling (Grinold 1989 Fundamental Law)
+// When Finnhub coverage is below fullConfidenceAt, quality weight scales
+// linearly by coverage_pct / fullConfidenceAt, floored at minConfidence.
+// Freed weight redistributes to momentum (always data-complete via Tiingo).
+// ---------------------------------------------------------------------------
+
+export const QUALITY_CONFIDENCE = {
+  fullConfidenceAt: 0.40,   // coverage_pct at which quality gets full weight
+  minConfidence:    0.10,   // floor: quality weight never drops below 10% of base
 };
 
 // ---------------------------------------------------------------------------
