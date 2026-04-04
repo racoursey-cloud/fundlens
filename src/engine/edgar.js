@@ -37,6 +37,22 @@ import { MONEY_MARKET_TICKERS }       from './constants.js';
 
 const DELAY_MS = 300;
 
+// ---------------------------------------------------------------------------
+// CIK overrides — funds missing from SEC's company_tickers_mf.json
+// ---------------------------------------------------------------------------
+// Some funds file NPORT-P under multi-series trust CIKs but their specific
+// share class tickers aren't in the SEC's ticker→CIK map. These overrides
+// provide the CIK and seriesId so edgar.js can find the correct filing.
+//
+// To add a new override:
+//   1. Search EFTS: /api/efts/LATEST/search-index?q="Fund Name"&forms=NPORT-P
+//   2. Open a recent filing's index page and note the CIK and seriesId
+//   3. Add the entry below
+const CIK_OVERRIDES = {
+  'OIBIX': { cik: '826644',   seriesId: 'S000064709' },  // Invesco International Bond R6
+  'BPLBX': { cik: '1738078',  seriesId: 'S000062365' },  // BlackRock Inflation Protected Bond K
+};
+
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
@@ -217,6 +233,73 @@ async function resolveCIKviaEFTS(ticker) {
 // ---------------------------------------------------------------------------
 // NPORT-P submission lookup
 // ---------------------------------------------------------------------------
+
+/**
+ * Fetches the submissions JSON for a CIK and returns the most recent NPORT-P
+ * accession number for a specific series (by checking each filing's index page).
+ *
+ * Multi-series trusts (e.g. "AIM INVESTMENT FUNDS" with 20+ Invesco funds)
+ * file separate NPORT-P filings per series. Without filtering by seriesId,
+ * fetchLatestNportAccNo would return the wrong fund's filing.
+ *
+ * Checks up to 20 NPORT-P filings (covers ~1 year of quarterly filings for
+ * a trust with ~5 concurrent series). Returns null if no match found.
+ *
+ * @param {string} cik      — Trust-level CIK
+ * @param {string} seriesId — e.g. "S000064709"
+ * @returns {Promise<string|null>} — Accession number with dashes, or null
+ */
+async function fetchNportAccNoForSeries(cik, seriesId) {
+  try {
+    const paddedCIK = formatCIK(cik);
+    const url = `/api/edgar/submissions/${paddedCIK}.json`;
+    const res = await fetch(url);
+    if (!res.ok) return null;
+
+    const json = await res.json();
+    const recent = json?.filings?.recent;
+    if (!recent) return null;
+
+    const forms      = recent.form           ?? [];
+    const accNumbers = recent.accessionNumber ?? [];
+
+    // Collect all NPORT-P accession numbers (newest first)
+    const nportAccNos = [];
+    for (let i = 0; i < forms.length; i++) {
+      if (forms[i] === 'NPORT-P') nportAccNos.push(accNumbers[i]);
+    }
+
+    // Check each filing's index page for the matching seriesId
+    const maxCheck = Math.min(nportAccNos.length, 20);
+    for (let i = 0; i < maxCheck; i++) {
+      const accNo = nportAccNos[i];
+      const accNoDashes = stripDashes(accNo);
+      const indexUrl = `/api/edgar/Archives/edgar/data/${bareCIK(cik)}/${accNoDashes}/${accNo}-index.htm`;
+
+      try {
+        const indexRes = await fetch(indexUrl);
+        if (!indexRes.ok) continue;
+        const html = await indexRes.text();
+
+        if (html.includes(seriesId)) {
+          console.log(`[edgar] Series ${seriesId} found in filing ${accNo} (checked ${i + 1} filings)`);
+          return accNo;
+        }
+      } catch {
+        // Non-fatal — try next filing
+      }
+
+      // Rate-limit SEC requests
+      if (i < maxCheck - 1) await sleep(DELAY_MS);
+    }
+
+    console.warn(`[edgar] Series ${seriesId} not found in ${maxCheck} NPORT-P filings for CIK ${cik}`);
+    return null;
+  } catch (err) {
+    console.warn(`[edgar] Series lookup failed for CIK ${cik}:`, err.message);
+    return null;
+  }
+}
 
 /**
  * Fetches the submissions JSON for a CIK and returns the most recent NPORT-P
@@ -668,6 +751,17 @@ async function parseNportXml(xmlUrl) {
 async function fetchHoldingsForTicker(ticker, cikMap) {
   // ── 1. Look up CIK from the MF tickers map ───────────────────────────────
   let cik = cikMap.get(ticker.toUpperCase()) ?? null;
+  let seriesId = null;
+
+  // ── 1b. CIK overrides for funds missing from SEC ticker map ──────────────
+  if (!cik) {
+    const override = CIK_OVERRIDES[ticker.toUpperCase()];
+    if (override) {
+      cik = override.cik;
+      seriesId = override.seriesId;
+      console.log(`[edgar] ${ticker} — using CIK override: CIK ${cik}, series ${seriesId}`);
+    }
+  }
 
   // ── 2. EFTS fallback ─────────────────────────────────────────────────────
   if (!cik) {
@@ -680,7 +774,11 @@ async function fetchHoldingsForTicker(ticker, cikMap) {
   }
 
   // ── 3. Find most recent NPORT-P accession number ─────────────────────────
-  const accNo = await fetchLatestNportAccNo(cik);
+  // For overrides with seriesId, search filings for the specific series.
+  // For normal lookups, take the first NPORT-P filing (existing behavior).
+  const accNo = seriesId
+    ? await fetchNportAccNoForSeries(cik, seriesId)
+    : await fetchLatestNportAccNo(cik);
   if (!accNo) {
     console.warn(`[edgar] ${ticker} — no NPORT-P filing found for CIK ${cik}`);
     return { holdings: [], meta: null };
