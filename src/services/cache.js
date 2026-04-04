@@ -88,7 +88,7 @@ export async function getEnabledSources(userId) {
  * Upserts a single user source preference.
  */
 export async function saveUserSourcePref(userId, sourceId, enabled) {
-  return supaFetch('user_source_prefs', {
+  return supaFetch('user_source_prefs?on_conflict=user_id,source_id', {
     method: 'POST',
     body: JSON.stringify({ user_id: userId, source_id: sourceId, enabled }),
     headers: {
@@ -113,7 +113,7 @@ export async function getWorldData() {
  * Upserts world data into cached_world_data row id=1.
  */
 export async function saveWorldData(fredData, headlines, treasuryData) {
-  return supaFetch('cached_world_data', {
+  return supaFetch('cached_world_data?on_conflict=id', {
     method: 'POST',
     body: JSON.stringify({
       id: 1,
@@ -478,7 +478,7 @@ export async function getUserWeights(userId) {
  * weights: { mandate, momentum, risk_adj, manager_quality, risk_tolerance, ... }
  */
 export async function saveUserWeights(userId, weights) {
-  return supaFetch('user_weights', {
+  return supaFetch('user_weights?on_conflict=user_id', {
     method: 'POST',
     body: JSON.stringify({ user_id: userId, ...weights }),
     headers: {
