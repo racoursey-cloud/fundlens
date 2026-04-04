@@ -130,9 +130,15 @@ function computeSectorAlignment(holdings, sectorScores) {
 /**
  * Computes momentum scores for ALL funds simultaneously.
  *   1. Collect rawReturn from tiingoData for each fund
- *   2. Compute mean and stdev across all available returns
- *   3. z = (rawReturn − mean) / stdev, winsorized to [−3, 3]
- *   4. momentum = 1 + 9 × Φ(z)   (continuous 1–10 S-curve)
+ *   2. Vol-scale: divide rawReturn by realized volatility (dailyReturns)
+ *      to remove systematic bias toward volatile funds (Barroso & Santa-Clara 2015)
+ *   3. Compute mean and sample stdev across all vol-scaled returns
+ *   4. z = (volScaledReturn − mean) / stdev, winsorized to [−3, 3]
+ *   5. momentum = 1 + 9 × Φ(z)   (continuous 1–10 S-curve)
+ *
+ * Vol-scaling ensures that a 10% return at 25% vol is not ranked higher than
+ * a 4% return at 5% vol. Funds with insufficient daily data (< 10 observations)
+ * fall back to raw return for the cross-sectional ranking.
  *
  * Funds with null rawReturn get momentum = null (caller applies 5.0 fallback).
  *
@@ -143,19 +149,38 @@ function computeSectorAlignment(holdings, sectorScores) {
 function computeCrossSectionalMomentum(tickers, tiingoData) {
   const result = {};
 
-  // Step 1: collect valid returns
+  // Step 1: collect vol-scaled returns
   const validReturns = [];
   const returnByTicker = {};
 
   for (const ticker of tickers) {
-    const raw = tiingoData?.[ticker]?.rawReturn;
-    if (raw != null && Number.isFinite(Number(raw))) {
-      const val = Number(raw);
-      validReturns.push(val);
-      returnByTicker[ticker] = val;
-    } else {
+    const data = tiingoData?.[ticker];
+    const raw  = data?.rawReturn;
+
+    if (raw == null || !Number.isFinite(Number(raw))) {
       returnByTicker[ticker] = null;
+      continue;
     }
+
+    let val = Number(raw);
+
+    // Vol-scale: rawReturn / realized period vol
+    // Requires ≥ 10 daily returns for a meaningful vol estimate
+    const dr = data?.dailyReturns;
+    if (Array.isArray(dr) && dr.length >= 10) {
+      const drMean = dr.reduce((a, b) => a + b, 0) / dr.length;
+      const drVar  = dr.reduce((acc, v) => acc + (v - drMean) ** 2, 0)
+                     / (dr.length - 1);
+      const dailyVol = Math.sqrt(drVar);
+
+      if (dailyVol > 0) {
+        const periodVol = dailyVol * Math.sqrt(dr.length);
+        val = raw / periodVol;   // risk-adjusted return (Sharpe-like)
+      }
+    }
+
+    validReturns.push(val);
+    returnByTicker[ticker] = val;
   }
 
   // If fewer than 2 valid returns, can't compute meaningful Z-scores
@@ -166,10 +191,10 @@ function computeCrossSectionalMomentum(tickers, tiingoData) {
     return result;
   }
 
-  // Step 2: mean and stdev
+  // Step 2: mean and sample stdev (Bessel-corrected, N−1)
   const mean = validReturns.reduce((a, b) => a + b, 0) / validReturns.length;
   const variance = validReturns.reduce((acc, v) => acc + (v - mean) ** 2, 0)
-                   / validReturns.length;
+                   / (validReturns.length - 1);
   const stdev = Math.sqrt(variance);
 
   // Guard against zero stdev (all returns identical)
