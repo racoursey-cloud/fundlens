@@ -599,7 +599,7 @@ app.get('/api/fmp/*', async (req, res) => {
   if (cached) return res.json(cached);
 
   try {
-    const url = `https://financialmodelingprep.com/api/${suffix}?${qs}`;
+    const url = `https://financialmodelingprep.com/${suffix}?${qs}`;
     const upstream = await proxyFetch(url);
 
     if (upstream.status === 429) {
