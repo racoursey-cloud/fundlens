@@ -9,23 +9,23 @@
 // that lack tickers (Fidelity, Vanguard, Allspring, etc.). This enables
 // fundamentals lookups for ~45% of funds that were previously scoring 5.0 fallback.
 //
-// A15: Added FMP (Financial Modeling Prep) as a fallback fundamentals provider.
-// When Finnhub returns no data for a ticker (403, empty metrics, or rate limit),
-// quality.js now tries FMP before counting the holding as a miss. This closes
-// two coverage gaps:
-//   Gap 1 — International equities: Finnhub free tier is US-only; FMP covers
-//           most large/mid-cap international equities.
-//   Gap 3 — Small/micro-cap stocks: Finnhub returns empty metrics for small-cap;
-//           FMP has broader small-cap coverage.
+// A15 Phase 1: Added FMP (Financial Modeling Prep) as a fallback fundamentals
+// provider. When Finnhub returns no data for a ticker (403, empty metrics, or
+// rate limit), quality.js now tries FMP before counting the holding as a miss.
 //
-// FMP metrics are normalized to Finnhub-compatible field names so piotroskiLite()
-// works unchanged. FMP data is cached in Supabase (fmp_cache table, 7-day TTL)
-// alongside the existing finnhub_cache.
+// A15 Phase 2: Fund-of-funds look-through scoring. When a holding IS a mutual
+// fund (detected via NPORT asset_type "RF" or OpenFIGI securityType2), quality.js:
+//   1. Fetches that fund's NPORT-P holdings from EDGAR
+//   2. Recursively scores those holdings via Piotroski-lite (depth limit = 1)
+//   3. Uses the resulting score as the holding-level quality score
+// This closes Gap 2: WFPRX, WEGRX holding other mutual funds (EVSRX, EKSRX,
+// EQIRX, EMGDX) — neither Finnhub nor FMP serves fundamentals for mutual funds.
 //
-// Two scoring paths by holding type:
-//   Equity  → Piotroski-lite (5 binary checks on fundamentals)
-//   Bond    → issuerCat quality map (A2 finding: no letter-grade ratings in NPORT-P)
-//   Blended → weighted average by equity/bond portfolio share
+// Three scoring paths by holding type:
+//   Equity      → Piotroski-lite (5 binary checks on fundamentals)
+//   Bond        → issuerCat quality map (A2 finding: no letter-grade ratings in NPORT-P)
+//   Fund-of-fund → Look-through: fetch underlying holdings, score recursively
+//   Blended     → weighted average by equity/bond/fund portfolio share
 //
 // Returns { score, coverage_pct, equity_ratio, bond_ratio, details } per fund.
 //
@@ -42,15 +42,18 @@
 import { apiFetch } from '../services/api.js';
 import { getFinnhubCache, saveFinnhubCache, getFmpCache, saveFmpCache } from '../services/cache.js';
 import { resolveCusipTickers } from './cusip.js';
+import { fetchSingleFundHoldings } from './edgar.js';
 
 // ---------------------------------------------------------------------------
 // Configuration
 // ---------------------------------------------------------------------------
 
-const TOP_N_EQUITY      = 15;    // top equity holdings by weight for fundamentals lookup
-const FINNHUB_DELAY_MS  = 300;   // delay between Finnhub API calls
-const FMP_DELAY_MS      = 300;   // delay between FMP API calls
-const FINNHUB_TIMEOUT   = 8000;  // per-call timeout (ms)
+const TOP_N_EQUITY         = 15;   // top equity holdings by weight for fundamentals lookup
+const LOOKTHROUGH_TOP_N    = 10;   // top fund-of-funds holdings for look-through scoring (A15 Phase 2)
+const FINNHUB_DELAY_MS     = 300;  // delay between Finnhub API calls
+const FMP_DELAY_MS         = 300;  // delay between FMP API calls
+const FINNHUB_TIMEOUT      = 8000; // per-call timeout (ms)
+const LOOKTHROUGH_DELAY_MS = 300;  // delay between look-through EDGAR fetches
 
 // ---------------------------------------------------------------------------
 // Bond quality map — issuerCat proxies (A2 finding, plan lines 188–199)
@@ -104,7 +107,7 @@ function sleep(ms) {
 }
 
 /**
- * Determines if a holding is equity (vs bond/debt/other).
+ * Determines if a holding is equity (vs bond/debt/fund/other).
  * Uses is_debt flag from edgar.js, plus asset_type as fallback.
  */
 function isEquityHolding(holding) {
@@ -115,6 +118,7 @@ function isEquityHolding(holding) {
   const at = (holding.asset_type || '').toUpperCase();
   if (at === 'EC' || at === 'EP') return true;  // equity common, equity preferred
   if (at === 'DBT' || at === 'ABS' || at === 'STIV') return false; // debt, ABS, short-term
+  if (at === 'RF') return false; // registered fund — handled by isFundHolding, not equity
 
   // A13: OpenFIGI-resolved security type (set by cusip.js)
   const resolved = (holding._resolved_security_type || '').toLowerCase();
@@ -123,6 +127,35 @@ function isEquityHolding(holding) {
 
   // If no explicit markers, treat as equity if it has a ticker and no debt flag
   if (holding.holding_ticker && !holding.is_debt) return true;
+
+  return false;
+}
+
+/**
+ * Determines if a holding is a mutual fund (for look-through scoring).
+ * Checks two signals:
+ *   1. NPORT asset_type "RF" (registered fund) — set by EDGAR XML parser
+ *   2. _is_underlying_fund flag — set by cusip.js via OpenFIGI securityType2
+ *
+ * A15 Phase 2: Must be checked BEFORE isEquityHolding() in the classification
+ * loop, because fund holdings with tickers would otherwise pass the fallback
+ * equity test (has ticker + no debt flag → true).
+ */
+function isFundHolding(holding) {
+  // Flag set by cusip.js from OpenFIGI securityType2
+  if (holding._is_underlying_fund === true) return true;
+
+  // NPORT assetCat = RF (registered fund)
+  const at = (holding.asset_type || '').toUpperCase();
+  if (at === 'RF') return true;
+
+  // OpenFIGI-resolved security type (for CUSIPs that went through resolution)
+  const resolved = (holding._resolved_security_type || '').toLowerCase();
+  if (resolved.includes('open-end fund') ||
+      resolved.includes('mutual fund') ||
+      resolved.includes('closed-end fund')) {
+    return true;
+  }
 
   return false;
 }
@@ -320,65 +353,83 @@ function hasUsableMetrics(metrics) {
 /**
  * Computes holdings quality score for a single fund.
  *
+ * A15 Phase 2: Added depth parameter for look-through recursion control.
+ *   depth 0 = top-level fund (look-through enabled for fund holdings)
+ *   depth 1 = underlying fund (look-through disabled — prevents runaway recursion)
+ *
  * @param {Array}  holdings        - Holdings array from edgar.js (enriched by classify.js)
  * @param {Object} metricsCache    - Shared Finnhub cache map { TICKER: metricsObject }, mutated in place
  * @param {Object} fmpMetricsCache - Shared FMP cache map { TICKER: metricsObject }, mutated in place (A15)
+ * @param {number} [depth=0]       - Recursion depth (A15 Phase 2). 0 = allow look-through, 1 = stop.
  * @returns {Promise<Object>} - { score, coverage_pct, equity_ratio, bond_ratio, details }
  */
-async function scoreFundQuality(holdings, metricsCache, fmpMetricsCache) {
+async function scoreFundQuality(holdings, metricsCache, fmpMetricsCache, depth = 0) {
   const result = {
     score:        5.0,    // fallback
     coverage_pct: 0,
     equity_ratio: 0,
     bond_ratio:   0,
     details: {
-      equityScore:    null,
-      bondScore:      null,
-      equityCount:    0,
-      bondCount:      0,
-      finnhubHits:    0,
-      fmpHits:        0,      // A15: holdings scored via FMP fallback
-      totalMisses:    0,      // A15: holdings with no data from either provider
+      equityScore:      null,
+      bondScore:        null,
+      equityCount:      0,
+      bondCount:        0,
+      fundHoldingCount: 0,      // A15 Phase 2: underlying fund holdings detected
+      finnhubHits:      0,
+      fmpHits:          0,      // A15: holdings scored via FMP fallback
+      lookThroughHits:  0,      // A15 Phase 2: holdings scored via look-through
+      totalMisses:      0,      // A15: holdings with no data from any provider
     },
   };
 
   if (!holdings || holdings.length === 0) return result;
 
-  // ── Separate equity vs bond holdings ────────────────────────────────────
-  const equities = [];
-  const bonds    = [];
+  // ── Separate equity vs bond vs fund holdings ───────────────────────────
+  // A15 Phase 2: Check isFundHolding() FIRST — fund holdings with tickers
+  // would otherwise pass isEquityHolding()'s fallback test.
+  const equities     = [];
+  const bonds        = [];
+  const fundHoldings = [];
 
   for (const h of holdings) {
-    if (isEquityHolding(h)) {
+    if (isFundHolding(h)) {
+      fundHoldings.push(h);
+    } else if (isEquityHolding(h)) {
       equities.push(h);
     } else if (h.is_debt || ['DBT', 'ABS'].includes((h.asset_type || '').toUpperCase())) {
       bonds.push(h);
     }
-    // Other types (STIV, RF, derivatives) are excluded from quality scoring
+    // Other types (STIV, derivatives) are excluded from quality scoring
   }
 
-  const totalWeight = holdings.reduce((sum, h) => sum + (h.weight ?? 0), 0);
+  const totalWeight  = holdings.reduce((sum, h) => sum + (h.weight ?? 0), 0);
   const equityWeight = equities.reduce((sum, h) => sum + (h.weight ?? 0), 0);
   const bondWeight   = bonds.reduce((sum, h) => sum + (h.weight ?? 0), 0);
+  const fundWeight   = fundHoldings.reduce((sum, h) => sum + (h.weight ?? 0), 0);
 
-  result.equity_ratio = totalWeight > 0 ? equityWeight / totalWeight : 0;
+  // Fund holdings are equity-like for ratio calculation (they hold equities internally)
+  result.equity_ratio = totalWeight > 0 ? (equityWeight + fundWeight) / totalWeight : 0;
   result.bond_ratio   = totalWeight > 0 ? bondWeight / totalWeight : 0;
-  result.details.equityCount = equities.length;
-  result.details.bondCount   = bonds.length;
+  result.details.equityCount      = equities.length;
+  result.details.bondCount        = bonds.length;
+  result.details.fundHoldingCount = fundHoldings.length;
 
-  // ── Equity scoring: Piotroski-lite on top 15 by weight ──────────────────
+  // ── Equity + Fund scoring: shared weighted average ─────────────────────
+  // Equity holdings scored via Piotroski-lite, fund holdings scored via
+  // look-through. Both contribute to the same weighted quality sum.
   let equityScaledScore = null;
   let equityCoverageWeight = 0;
 
+  // Hoisted accumulators so both equity and fund scoring contribute
+  let weightedQualitySum = 0;
+  let scoredWeight = 0;
+
+  // ── Equity scoring: Piotroski-lite on top 15 by weight ────────────────
   if (equities.length > 0) {
     // Sort by weight descending, take top 15
     const topEquities = [...equities]
       .sort((a, b) => (b.weight ?? 0) - (a.weight ?? 0))
       .slice(0, TOP_N_EQUITY);
-
-    const topTotalWeight = topEquities.reduce((s, h) => s + (h.weight ?? 0), 0);
-    let weightedQualitySum = 0;
-    let scoredWeight = 0;
 
     for (let i = 0; i < topEquities.length; i++) {
       const h = topEquities[i];
@@ -462,15 +513,84 @@ async function scoreFundQuality(holdings, metricsCache, fmpMetricsCache) {
         }
       }
     }
-
-    if (scoredWeight > 0) {
-      const equityQuality = weightedQualitySum / scoredWeight; // 0 to 1
-      equityScaledScore = 1 + 9 * equityQuality; // 1 to 10
-      equityCoverageWeight = scoredWeight;
-    }
-
-    result.details.equityScore = equityScaledScore;
   }
+
+  // ── Fund-of-funds look-through scoring (A15 Phase 2) ──────────────────
+  // Only at depth 0 (top-level funds). Depth 1 = underlying fund → no further
+  // look-through. If the underlying fund also holds funds, those score 5.0.
+  if (fundHoldings.length > 0 && depth === 0) {
+    const topFunds = [...fundHoldings]
+      .sort((a, b) => (b.weight ?? 0) - (a.weight ?? 0))
+      .slice(0, LOOKTHROUGH_TOP_N);
+
+    console.log(`[quality] Look-through: ${topFunds.length} fund holdings to score ` +
+      `(${fundHoldings.length} total, top ${LOOKTHROUGH_TOP_N})`);
+
+    for (let i = 0; i < topFunds.length; i++) {
+      const h = topFunds[i];
+      const ticker = (h.holding_ticker || '').replace(/[^A-Z]/gi, '').toUpperCase();
+
+      if (!ticker) {
+        result.details.totalMisses++;
+        continue;
+      }
+
+      console.log(`[quality] Look-through: fetching ${ticker} holdings (weight=${(h.weight ?? 0).toFixed(2)}%)`);
+
+      try {
+        // Fetch underlying fund's NPORT-P holdings from EDGAR
+        const { holdings: underlyingHoldings } = await fetchSingleFundHoldings(ticker);
+
+        if (!underlyingHoldings || underlyingHoldings.length === 0) {
+          console.warn(`[quality] Look-through: ${ticker} — no holdings found`);
+          result.details.totalMisses++;
+          continue;
+        }
+
+        console.log(`[quality] Look-through: ${ticker} — ${underlyingHoldings.length} holdings, scoring...`);
+
+        // Score the underlying fund recursively (depth = 1 prevents further look-through)
+        // Pass shared caches so overlapping equities (AAPL across multiple underlying
+        // funds) hit Finnhub/FMP only once.
+        const underlyingResult = await scoreFundQuality(
+          underlyingHoldings, metricsCache, fmpMetricsCache, depth + 1
+        );
+
+        // Accept the score if it moved from fallback OR has any coverage
+        if (underlyingResult.score !== 5.0 || underlyingResult.coverage_pct > 0) {
+          // Convert 1–10 scaled score back to 0–1 quality for weighted average
+          const holdingQuality = (underlyingResult.score - 1) / 9;
+          weightedQualitySum += holdingQuality * (h.weight ?? 0);
+          scoredWeight += (h.weight ?? 0);
+          result.details.lookThroughHits++;
+
+          console.log(`[quality] Look-through: ${ticker} → score=${underlyingResult.score.toFixed(2)}, ` +
+            `coverage=${(underlyingResult.coverage_pct * 100).toFixed(0)}%, ` +
+            `equity=${underlyingResult.details.equityCount}, bond=${underlyingResult.details.bondCount}`);
+        } else {
+          console.warn(`[quality] Look-through: ${ticker} — scored 5.0 with 0% coverage, counting as miss`);
+          result.details.totalMisses++;
+        }
+      } catch (err) {
+        console.warn(`[quality] Look-through error for ${ticker}:`, err.message);
+        result.details.totalMisses++;
+      }
+
+      // Rate limit between look-through fetches
+      if (i < topFunds.length - 1) {
+        await sleep(LOOKTHROUGH_DELAY_MS);
+      }
+    }
+  }
+
+  // ── Compute blended equity-like score (equities + fund look-throughs) ──
+  if (scoredWeight > 0) {
+    const equityQuality = weightedQualitySum / scoredWeight; // 0 to 1
+    equityScaledScore = 1 + 9 * equityQuality; // 1 to 10
+    equityCoverageWeight = scoredWeight;
+  }
+
+  result.details.equityScore = equityScaledScore;
 
   // ── Bond scoring: issuerCat quality map ─────────────────────────────────
   let bondScaledScore = null;
@@ -494,6 +614,7 @@ async function scoreFundQuality(holdings, metricsCache, fmpMetricsCache) {
   }
 
   // ── Blended score (plan lines 201–206) ──────────────────────────────────
+  // equity_ratio now includes fund holding weight (they're equity-like)
   if (equityScaledScore != null && bondScaledScore != null) {
     // Both paths have data — blend by portfolio share
     result.score = (equityScaledScore * result.equity_ratio)
@@ -506,15 +627,17 @@ async function scoreFundQuality(holdings, metricsCache, fmpMetricsCache) {
   // else: stays at 5.0 fallback
 
   // ── Coverage percentage (plan lines 183, 208–211) ───────────────────────
-  // Equity coverage: weight of holdings with data / total equity weight
+  // Equity coverage: weight of scored holdings / total equity-like weight
+  // (includes fund look-through weight in both numerator and denominator)
   // Bond coverage: all bonds are scored (issuerCat always produces a value) = 100%
-  const equityCoverage = equityWeight > 0 ? equityCoverageWeight / equityWeight : 0;
+  const totalEquityLikeWeight = equityWeight + fundWeight;
+  const equityCoverage = totalEquityLikeWeight > 0 ? equityCoverageWeight / totalEquityLikeWeight : 0;
   const bondCoverage   = bondWeight > 0 ? 1.0 : 0; // bonds always have issuerCat score
 
   // Overall coverage weighted by equity/bond ratio
   if (totalWeight > 0) {
-    result.coverage_pct = (equityCoverage * equityWeight + bondCoverage * bondWeight)
-                        / (equityWeight + bondWeight || 1);
+    result.coverage_pct = (equityCoverage * totalEquityLikeWeight + bondCoverage * bondWeight)
+                        / (totalEquityLikeWeight + bondWeight || 1);
   }
 
   return result;
@@ -563,7 +686,7 @@ export async function computeHoldingsQuality(holdingsMap, onProgress) {
   for (const fundTicker of tickers) {
     const holdings = holdingsMap[fundTicker]?.holdings ?? [];
     const equities = holdings
-      .filter(h => isEquityHolding(h))
+      .filter(h => isEquityHolding(h) && !isFundHolding(h))
       .sort((a, b) => (b.weight ?? 0) - (a.weight ?? 0))
       .slice(0, TOP_N_EQUITY);
 
@@ -616,8 +739,8 @@ export async function computeHoldingsQuality(holdingsMap, onProgress) {
         bond_ratio:   0,
         details: {
           equityScore: null, bondScore: null,
-          equityCount: 0, bondCount: 0,
-          finnhubHits: 0, fmpHits: 0, totalMisses: 0,
+          equityCount: 0, bondCount: 0, fundHoldingCount: 0,
+          finnhubHits: 0, fmpHits: 0, lookThroughHits: 0, totalMisses: 0,
         },
       };
     } else {
@@ -625,12 +748,13 @@ export async function computeHoldingsQuality(holdingsMap, onProgress) {
       results[ticker] = await scoreFundQuality(holdings, metricsCache, fmpMetricsCache);
 
       const d = results[ticker].details;
-      const totalScored = d.finnhubHits + d.fmpHits;
+      const totalScored = d.finnhubHits + d.fmpHits + d.lookThroughHits;
       const totalAttempted = totalScored + d.totalMisses;
 
       console.log(`[quality] ${ticker} → score=${results[ticker].score.toFixed(2)}, ` +
         `coverage=${(results[ticker].coverage_pct * 100).toFixed(0)}%, ` +
-        `hits=${totalScored}/${totalAttempted} (finnhub=${d.finnhubHits}, fmp=${d.fmpHits}, miss=${d.totalMisses})`);
+        `hits=${totalScored}/${totalAttempted} ` +
+        `(finnhub=${d.finnhubHits}, fmp=${d.fmpHits}, lookThrough=${d.lookThroughHits}, miss=${d.totalMisses})`);
     }
 
     completed++;
