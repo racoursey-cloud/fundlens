@@ -156,60 +156,66 @@ async function fetchFinnhubMetrics(ticker) {
 
 /**
  * Fetches financial metrics for a single equity ticker from FMP.
- * Endpoint: /api/fmp/v3/key-metrics-ttm/{ticker}
+ * Endpoint: /api/fmp/stable/ratios?symbol={ticker}&period=annual
  *
- * FMP returns an array — we take the first element and normalize field names
- * to match Finnhub's naming so piotroskiLite() works unchanged.
+ * FMP's stable API returns an array of annual ratio objects (newest first).
+ * We take the first element and normalize field names to match Finnhub's
+ * naming so piotroskiLite() works unchanged.
  *
- * FMP key-metrics-ttm fields used:
- *   roeTTM                   → roeTTM
- *   netIncomePerShareTTM     → (sign check for profit margin proxy)
- *   debtToEquityTTM          → totalDebtToEquityQuarterly
- *   freeCashFlowPerShareTTM  → freeCashFlowTTM (per-share proxy, sign is what matters)
- *   revenuePerShareTTM       → (not directly usable for growth — skipped)
- *
- * Also tries the ratios-ttm fields if key-metrics fields are absent:
- *   returnOnEquityTTM        → roeTTM
- *   netProfitMarginTTM       → netProfitMarginTTM
- *   debtEquityRatioTTM       → totalDebtToEquityQuarterly
+ * FMP stable/ratios fields used:
+ *   netProfitMargin              → netProfitMarginTTM
+ *   debtToEquityRatio            → totalDebtToEquityQuarterly
+ *   freeCashFlowPerShare         → freeCashFlowTTM (sign is what Piotroski checks)
+ *   netIncomePerShare / bookValuePerShare → roeTTM (derived DuPont-style)
+ *   revenuePerShare (current vs prior yr) → revenueGrowthTTMYoy (derived)
  *
  * Returns a Finnhub-compatible metrics object or null on failure.
  */
 async function fetchFmpMetrics(ticker) {
   try {
     const data = await apiFetch(
-      `/api/fmp/v3/key-metrics-ttm/${encodeURIComponent(ticker)}`
+      `/api/fmp/stable/ratios?symbol=${encodeURIComponent(ticker)}&period=annual`
     );
 
-    // FMP returns an array — take first element
+    // FMP returns an array of annual periods — take first (most recent)
     const raw = Array.isArray(data) ? data[0] : data;
     if (!raw || typeof raw !== 'object') return null;
 
     // Check for FMP error responses (e.g. { "Error Message": "..." })
     if (raw['Error Message']) return null;
 
+    // Derive ROE from net income per share / book value per share
+    let derivedROE = null;
+    if (raw.netIncomePerShare != null && raw.bookValuePerShare != null && raw.bookValuePerShare !== 0) {
+      derivedROE = raw.netIncomePerShare / raw.bookValuePerShare;
+    }
+
+    // Derive revenue growth from current vs prior year
+    let derivedRevGrowth = null;
+    if (Array.isArray(data) && data.length >= 2) {
+      const currRev = data[0]?.revenuePerShare;
+      const prevRev = data[1]?.revenuePerShare;
+      if (currRev != null && prevRev != null && prevRev !== 0) {
+        derivedRevGrowth = (currRev - prevRev) / Math.abs(prevRev);
+      }
+    }
+
     // Normalize to Finnhub-compatible field names for piotroskiLite()
     const metrics = {
-      // ROE: prefer roeTTM, fall back to returnOnEquityTTM
-      roeTTM: raw.roeTTM ?? raw.returnOnEquityTTM ?? null,
+      // ROE: derived from NI/BV
+      roeTTM: derivedROE,
 
-      // Profit margin: prefer netProfitMarginTTM (from ratios-style response),
-      // fall back to deriving sign from netIncomePerShareTTM
-      netProfitMarginTTM: raw.netProfitMarginTTM ?? (
-        raw.netIncomePerShareTTM != null
-          ? (raw.netIncomePerShareTTM > 0 ? 0.01 : -0.01)  // sign proxy
-          : null
-      ),
+      // Profit margin: direct field
+      netProfitMarginTTM: raw.netProfitMargin ?? null,
 
-      // Debt-to-equity: prefer debtToEquityTTM, fall back to debtEquityRatioTTM
-      totalDebtToEquityQuarterly: raw.debtToEquityTTM ?? raw.debtEquityRatioTTM ?? null,
+      // Debt-to-equity: direct field
+      totalDebtToEquityQuarterly: raw.debtToEquityRatio ?? null,
 
-      // Revenue growth: not available in key-metrics-ttm or ratios-ttm
-      // piotroskiLite handles null gracefully (skips this check)
-      revenueGrowthTTMYoy: null,
+      // Revenue growth: derived from YoY revenue per share
+      revenueGrowthTTMYoy: derivedRevGrowth,
 
       // Free cash flow: per-share is fine — sign is what Piotroski checks
-      freeCashFlowTTM: raw.freeCashFlowPerShareTTM ?? raw.freeCashFlowTTM ?? null,
+      freeCashFlowTTM: raw.freeCashFlowPerShare ?? null,
     };
 
     // Only return if we got at least one usable metric
