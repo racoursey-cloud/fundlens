@@ -8,10 +8,11 @@
 //      No median gate — the exponential curve and capture threshold
 //      naturally starve low-scoring funds without a hard cliff.
 //   2. Exponential allocation: k = 0.1 + (riskTolerance × 0.20), weight = e^(k × Z)
-//   3. 30% per-fund hard cap with proportional redistribution
-//   4. Capture threshold: walk ranked allocations until cumulative weight
+//   3. Capture threshold: walk ranked allocations until cumulative weight
 //      hits a risk-scaled target, trim the tail, re-normalize to 100%
-//   5. Round to 1 decimal, absorb rounding error into largest holding
+//      No position cap — the exponential curve, capture threshold, and
+//      concentration penalty (scoring.js) provide natural constraints.
+//   4. Round to 1 decimal, absorb rounding error into largest holding
 //
 // No Claude calls. No external API calls. Pure math.
 // Concentration penalty is already applied in scoring.js — not recalculated here.
@@ -115,40 +116,21 @@ export function computeAllocations(scoredFunds, riskTolerance) {
 
   const totalRaw = rawEntries.reduce((acc, e) => acc + e.rawWeight, 0) || 1;
 
-  // Normalise to 100 (internal percentages for cap logic)
+  // Normalise to 100 (internal percentages)
   const allocMap = {};
   for (const { ticker, rawWeight } of rawEntries) {
     allocMap[ticker] = (rawWeight / totalRaw) * 100;
   }
 
-  // ── STEP 3 — 30% Position Cap ─────────────────────────────────────────────
-  // Iteratively redistribute excess from capped funds to uncapped funds.
-  const CAP = 30;
-
-  for (let iter = 0; iter < 30; iter++) {
-    const capped   = Object.entries(allocMap).filter(([, v]) => v >  CAP);
-    const uncapped = Object.entries(allocMap).filter(([, v]) => v <= CAP);
-
-    if (capped.length === 0) break;
-
-    let excess = 0;
-    for (const [ticker] of capped) {
-      excess          += allocMap[ticker] - CAP;
-      allocMap[ticker] = CAP;
-    }
-
-    const uncappedSum = uncapped.reduce((acc, [, v]) => acc + v, 0) || 1;
-    for (const [ticker, val] of uncapped) {
-      allocMap[ticker] = val + excess * (val / uncappedSum);
-    }
-  }
-
-  // ── STEP 4 — Capture Threshold (risk-scaled fund count) ─────────────────
+  // ── STEP 3 — Capture Threshold (risk-scaled fund count) ─────────────────
   // Walk down ranked allocations until cumulative weight hits a risk-scaled
   // target. Trim the tail, then re-normalize survivors to 100%.
-  // Fund count is data-driven (responds to score distribution shape) but
-  // clamped to [minFunds, maxFunds] guardrails.
-  const { captureHigh, captureStep, minFunds, maxFunds } = ALLOCATION_LIMITS;
+  // Fund count is fully data-driven — no artificial floor or ceiling.
+  // Three natural constraints prevent runaway concentration:
+  //   1. Exponential curve — weight gaps between Z-scores create natural spread
+  //   2. Capture threshold — stops adding funds once target is met
+  //   3. Concentration penalty in scoring.js — penalizes single-sector exposure
+  const { captureHigh, captureStep } = ALLOCATION_LIMITS;
   const targetCapture = captureHigh - (rt - 1) * captureStep;
 
   const ranked = Object.entries(allocMap)
@@ -158,14 +140,12 @@ export function computeAllocations(scoredFunds, riskTolerance) {
   let keepCount  = 0;
 
   for (const [, alloc] of ranked) {
-    if (keepCount >= maxFunds) break;
     cumulative += alloc;
     keepCount++;
-    if (cumulative >= targetCapture && keepCount >= minFunds) break;
+    if (cumulative >= targetCapture) break;
   }
 
-  // Clamp to guardrails, and never exceed how many we actually have
-  keepCount = Math.max(minFunds, Math.min(maxFunds, keepCount));
+  // Never exceed how many eligible funds we actually have
   keepCount = Math.min(keepCount, ranked.length);
 
   // Remove trimmed funds from allocMap
@@ -180,7 +160,7 @@ export function computeAllocations(scoredFunds, riskTolerance) {
     allocMap[ticker] = (allocMap[ticker] / keptSum) * 100;
   }
 
-  // ── STEP 5 — Rounding Cleanup ─────────────────────────────────────────────
+  // ── STEP 4 — Rounding Cleanup ─────────────────────────────────────────────
   // Round each position to 1 decimal place.
   for (const ticker of Object.keys(allocMap)) {
     allocMap[ticker] = parseFloat(allocMap[ticker].toFixed(1));
@@ -198,7 +178,7 @@ export function computeAllocations(scoredFunds, riskTolerance) {
     }
   }
 
-  // ── STEP 6 — Assemble Return Shape ────────────────────────────────────────
+  // ── STEP 5 — Assemble Return Shape ────────────────────────────────────────
   // { ticker, allocation_pct (0–1 decimal), tier (string), modZ, composite }
   // Sorted by allocation_pct descending. Non-allocated funds have allocation_pct = 0.
   const result = withZ.map(fund => {
