@@ -263,6 +263,7 @@ export async function runPipeline(userId, userFunds, userWeights, onStep) {
         thesisResult?.thesis ?? null,    // pass the string, NOT the full object
         sectorScores,                     // original shape with reasons
         holdingsMap,                      // full holdings for fund composition detail
+        userWeights.risk_tolerance ?? 5,  // risk level for allocation framing
         detail => onStep(10, detail)
       );
       investorLetter = letterResult?.letter ?? null;
@@ -313,9 +314,9 @@ export async function runPipeline(userId, userFunds, userWeights, onStep) {
         allocation:      allocationMap,
         risk_tolerance:  userWeights.risk_tolerance ?? 5,
         factor_weights: {
-          sectorAlignment:  userWeights.sectorAlignment  ?? 40,
-          momentum:         userWeights.momentum          ?? 30,
-          holdingsQuality:  userWeights.holdingsQuality   ?? 30,
+          sectorAlignment:  userWeights.sectorAlignment  ?? 25,
+          momentum:         userWeights.momentum          ?? 40,
+          holdingsQuality:  userWeights.holdingsQuality   ?? 35,
         },
         data_quality: worldData?.dataQuality ?? {},
       });
