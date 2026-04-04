@@ -18,6 +18,7 @@ import * as cache             from '../services/cache.js';
 import { supaFetch }          from '../services/api.js';
 import {
   DEFAULT_WEIGHTS,
+  QUALITY_CONFIDENCE,
   SEED_SCORES,
   FACTOR_KEYS,
   DEFAULT_FUNDS,
@@ -280,21 +281,23 @@ const useAppStore = create((set, get) => ({
     set({ weights: newWeights });
 
     try {
-      const rawW1 = Number(newWeights.sectorAlignment)  || 40;
-      const rawW2 = Number(newWeights.momentum)          || 30;
-      const rawW3 = Number(newWeights.holdingsQuality)   || 30;
+      const rawW1 = Number(newWeights.sectorAlignment)  || DEFAULT_WEIGHTS.sectorAlignment;
+      const rawW2 = Number(newWeights.momentum)          || DEFAULT_WEIGHTS.momentum;
+      const rawW3 = Number(newWeights.holdingsQuality)   || DEFAULT_WEIGHTS.holdingsQuality;
 
       // Recompute composites from existing sub-scores (already on each fund).
       const recomposited = funds.map(f => {
         if (f.isMoneyMarket) return { ...f };
 
         // Per-fund weight adjustment: if quality coverage was low, scoring.js
-        // halved the quality weight and added it to sector alignment.
+        // scaled the quality weight by confidence (Grinold 1989) and routed
+        // freed weight to momentum (always data-complete via Tiingo).
         let adjW1 = rawW1, adjW2 = rawW2, adjW3 = rawW3;
         if (f.dataQuality?.qualityWeightHalved) {
-          const freed = adjW3 / 2;
-          adjW3 -= freed;
-          adjW1 += freed;
+          const confidence = f.dataQuality?.qualityConfidence ?? QUALITY_CONFIDENCE.minConfidence;
+          const freed = adjW3 * (1 - confidence);
+          adjW3 = adjW3 * confidence;
+          adjW2 += freed;            // freed weight → momentum
         }
         const wSum = adjW1 + adjW2 + adjW3 || 1;
 
