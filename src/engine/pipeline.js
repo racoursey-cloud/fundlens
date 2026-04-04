@@ -253,7 +253,8 @@ export async function runPipeline(userId, userFunds, userWeights, onStep) {
 
     // ── STEP 10 — Investor Letter ────────────────────────────────────────────
     // letter.js expects: scoredFunds (sorted array), allocations (outlier output),
-    // thesis (STRING), sectorScores (original { Sector: { score, reason } } shape).
+    // thesis (STRING), sectorScores (original { Sector: { score, reason } } shape),
+    // holdingsMap (full { TICKER: { holdings, meta } } shape for composition data).
     onStep(10, 'Generating investor letter...');
     try {
       const letterResult = await generateInvestorLetter(
@@ -261,6 +262,7 @@ export async function runPipeline(userId, userFunds, userWeights, onStep) {
         allocations,
         thesisResult?.thesis ?? null,    // pass the string, NOT the full object
         sectorScores,                     // original shape with reasons
+        holdingsMap,                      // full holdings for fund composition detail
         detail => onStep(10, detail)
       );
       investorLetter = letterResult?.letter ?? null;
