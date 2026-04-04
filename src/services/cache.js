@@ -7,6 +7,7 @@
 //   holdings_cache    → 15 days  (checked on first row cached_at)
 //   fund_profiles     → 90 days  (per-row fetched_at filter)
 //   tiingo_cache      → 1 day    (per-row cached_at filter)
+//   finnhub_cache     → 7 days   (per-row cached_at filter)
 //   sector_mappings   → permanent (no TTL)
 //   source_registry   → no TTL   (admin-managed)
 //   world / run /     → no TTL   (caller decides when to refresh)
@@ -355,6 +356,54 @@ export async function saveTiingoCache(ticker, data) {
       sharpe:    data.sharpe   ?? null,
       risk_adj:  data.riskAdj  ?? null,
       raw_data:  data.rawData  ?? null,
+      cached_at: new Date().toISOString(),
+    }),
+    headers: {
+      'Prefer': 'resolution=merge-duplicates,return=representation',
+    },
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Finnhub Metrics Cache (7-day TTL)
+// ---------------------------------------------------------------------------
+
+/**
+ * Returns a map of { TICKER: metricsObject } for the given tickers.
+ * Rows older than 7 days are excluded. Fundamentals change quarterly at most,
+ * so a 7-day TTL eliminates ~95% of API calls after the first full run.
+ *
+ * @param {Array} tickers — ['AAPL', 'MSFT', ...]
+ * @returns {Object} — { AAPL: { roeTTM, netProfitMarginTTM, ... }, ... }
+ */
+export async function getFinnhubCache(tickers) {
+  if (!tickers || tickers.length === 0) return {};
+
+  const rows = await supaFetch(
+    `finnhub_cache?ticker=in.(${inList(tickers)})`
+  );
+  if (!Array.isArray(rows) || rows.length === 0) return {};
+
+  const result = {};
+  for (const row of rows) {
+    if (isStale(row.cached_at, 7)) continue;
+    result[row.ticker.toUpperCase()] = row.metrics ?? null;
+  }
+  return result;
+}
+
+/**
+ * Upserts a single ticker's Finnhub metrics into the cache.
+ *
+ * @param {string} ticker — e.g. 'AAPL'
+ * @param {Object} metrics — raw Finnhub metric object
+ */
+export async function saveFinnhubCache(ticker, metrics) {
+  return supaFetch('finnhub_cache?on_conflict=ticker', {
+    method: 'POST',
+    body: JSON.stringify({
+      ticker:    ticker.toUpperCase(),
+      metrics:   metrics,
       cached_at: new Date().toISOString(),
     }),
     headers: {
