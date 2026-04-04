@@ -4,13 +4,14 @@
 // No direct Supabase calls. No localStorage.
 //
 // TTL summary:
-//   holdings_cache    → 15 days  (checked on first row cached_at)
-//   fund_profiles     → 90 days  (per-row fetched_at filter)
-//   tiingo_cache      → 1 day    (per-row cached_at filter)
-//   finnhub_cache     → 7 days   (per-row cached_at filter)
-//   sector_mappings   → permanent (no TTL)
-//   source_registry   → no TTL   (admin-managed)
-//   world / run /     → no TTL   (caller decides when to refresh)
+//   holdings_cache      → 15 days  (checked on first row cached_at)
+//   fund_profiles       → 90 days  (per-row fetched_at filter)
+//   tiingo_cache        → 1 day    (per-row cached_at filter)
+//   finnhub_cache       → 7 days   (per-row cached_at filter)
+//   cusip_ticker_cache  → 90 days  (per-row cached_at filter) — A13
+//   sector_mappings     → permanent (no TTL)
+//   source_registry     → no TTL   (admin-managed)
+//   world / run /       → no TTL   (caller decides when to refresh)
 //   user tables
 //
 // A10 changes:
@@ -19,6 +20,11 @@
 //   - saveHoldings now persists v5.1 A2 fields: cusip, issuer_cat,
 //     liquidity_class, fair_val_level, is_debt, debt_is_default,
 //     debt_in_arrears, debt_coupon_kind, debt_annualized_rt, debt_maturity_dt.
+//
+// A13 changes:
+//   - Added getCusipCache() and saveCusipCache() for CUSIP→ticker cache
+//     (cusip_ticker_cache table, 90-day TTL). Used by cusip.js to resolve
+//     CUSIPs to equity tickers via OpenFIGI before quality scoring.
 
 import { supaFetch } from './api.js';
 import { DEFAULT_WEIGHTS } from '../engine/constants.js';
@@ -411,6 +417,80 @@ export async function saveFinnhubCache(ticker, metrics) {
       'Prefer': 'resolution=merge-duplicates,return=representation',
     },
   });
+}
+
+// ---------------------------------------------------------------------------
+// CUSIP→Ticker Cache (90-day TTL) — A13
+// ---------------------------------------------------------------------------
+
+/**
+ * Returns a map of { CUSIP: { ticker, name, security_type, market_sector } }
+ * for the given CUSIPs. Rows older than 90 days are excluded.
+ *
+ * CUSIPs are batched in groups of 200 to keep PostgREST URL lengths reasonable.
+ *
+ * @param {Array} cusips — ['037833100', '594918104', ...]
+ * @returns {Object} — { '037833100': { ticker: 'AAPL', name: 'APPLE INC', ... }, ... }
+ */
+export async function getCusipCache(cusips) {
+  if (!cusips || cusips.length === 0) return {};
+
+  const result = {};
+
+  // Batch in groups of 200 to avoid overly long URLs
+  for (let i = 0; i < cusips.length; i += 200) {
+    const batch = cusips.slice(i, i + 200);
+    const rows = await supaFetch(
+      `cusip_ticker_cache?cusip=in.(${inList(batch)})`
+    );
+    if (!Array.isArray(rows)) continue;
+
+    for (const row of rows) {
+      if (isStale(row.cached_at, 90)) continue;
+      result[row.cusip] = {
+        ticker:        row.ticker        ?? null,
+        name:          row.name          ?? null,
+        security_type: row.security_type ?? null,
+        market_sector: row.market_sector ?? null,
+      };
+    }
+  }
+
+  return result;
+}
+
+/**
+ * Upserts a batch of CUSIP→ticker mappings into the cache.
+ * Includes "not found" results (ticker=null) to avoid re-querying
+ * bonds, private placements, and other non-equity CUSIPs.
+ *
+ * @param {Array} mappings — [{ cusip, ticker, name, security_type, market_sector, figi }, ...]
+ */
+export async function saveCusipCache(mappings) {
+  if (!mappings || mappings.length === 0) return;
+
+  const now = new Date().toISOString();
+  const rows = mappings.map(m => ({
+    cusip:         m.cusip,
+    ticker:        m.ticker        ?? null,
+    name:          m.name          ?? null,
+    security_type: m.security_type ?? null,
+    market_sector: m.market_sector ?? null,
+    figi:          m.figi          ?? null,
+    cached_at:     now,
+  }));
+
+  // Batch insert in groups of 50 to match saveHoldings pattern
+  for (let i = 0; i < rows.length; i += 50) {
+    const batch = rows.slice(i, i + 50);
+    await supaFetch('cusip_ticker_cache?on_conflict=cusip', {
+      method: 'POST',
+      body: JSON.stringify(batch),
+      headers: {
+        'Prefer': 'resolution=merge-duplicates,return=representation',
+      },
+    });
+  }
 }
 
 // ---------------------------------------------------------------------------
