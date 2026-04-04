@@ -39,7 +39,7 @@ function sleep(ms) {
 // Assembles the full prompt from scored funds, allocations, thesis, sector
 // scores, and holdingsMap. Designed for non-finance 401K investors.
 
-function buildLetterPrompt(scoredFunds, allocations, thesis, sectorScores, holdingsMap) {
+function buildLetterPrompt(scoredFunds, allocations, thesis, sectorScores, holdingsMap, riskTolerance) {
   const lines = [];
 
   // ── Context header ────────────────────────────────────────────────────────
@@ -77,6 +77,27 @@ function buildLetterPrompt(scoredFunds, allocations, thesis, sectorScores, holdi
     }
   } else {
     lines.push('(no allocations available)');
+  }
+  lines.push('');
+
+  // ── Risk context ──────────────────────────────────────────────────────────
+  const allocCount = (allocations ?? []).filter(a => a.allocation_pct > 0).length;
+  const riskVal    = riskTolerance ?? 5;
+  const riskDesc   = riskVal <= 3 ? 'conservative' : riskVal <= 6 ? 'moderate' : 'aggressive';
+  lines.push('=== INVESTOR RISK SETTING ===');
+  lines.push(`Risk tolerance: ${riskVal}/9 (${riskDesc})`);
+  lines.push(`Number of funds allocated: ${allocCount}`);
+  if (riskVal <= 3) {
+    lines.push('This investor prefers spreading across more funds to reduce the impact');
+    lines.push('if any single thesis breaks down. The allocation reflects caution, not');
+    lines.push('a different view of the economy.');
+  } else if (riskVal >= 7) {
+    lines.push('This investor prefers concentrating in the highest-conviction picks.');
+    lines.push('Fewer funds, larger positions. The allocation reflects confidence in the');
+    lines.push('ranking order, not a different view of the economy.');
+  } else {
+    lines.push('This investor is comfortable with a balanced number of funds and moderate');
+    lines.push('concentration in the top picks.');
   }
   lines.push('');
 
@@ -134,17 +155,28 @@ function buildLetterPrompt(scoredFunds, allocations, thesis, sectorScores, holdi
   lines.push('=== WRITING INSTRUCTIONS ===');
   lines.push('Write a 400–600 word letter for 401K participants. Not finance professionals.');
   lines.push('');
+  lines.push('CRITICAL PRINCIPLE:');
+  lines.push('The economic picture and the reasons each fund is good are IDENTICAL regardless');
+  lines.push('of risk setting. A fund is good because of what it holds and what is happening');
+  lines.push('in the world — not because of the investor\'s risk tolerance. The ONLY thing');
+  lines.push('the risk setting changes is how many funds are included and how concentrated');
+  lines.push('the allocation is. Never invent different economic arguments for different');
+  lines.push('risk levels.');
+  lines.push('');
   lines.push('STRUCTURE:');
   lines.push('');
   lines.push('PARAGRAPH 1 — INTRODUCTION:');
   lines.push('Name the recommended funds with percentages. Set the scene: what is happening');
-  lines.push('in the economy RIGHT NOW that makes these the right picks? Use the specific');
+  lines.push('in the economy RIGHT NOW that makes these the right picks? Use specific');
   lines.push('numbers from the thesis (oil price, gold price, consumer confidence, rates).');
-  lines.push('Don\'t just say "challenging environment" — say what\'s actually happening.');
+  lines.push('Include one sentence explaining the allocation structure based on the risk');
+  lines.push('setting — e.g., "With a conservative approach, we\'re spreading across six');
+  lines.push('funds to reduce concentration risk" or "With an aggressive approach, we\'re');
+  lines.push('concentrating in the three highest-conviction picks."');
   lines.push('');
   lines.push('PARAGRAPHS 2–N — ONE PARAGRAPH PER RECOMMENDED FUND:');
-  lines.push('For each fund, make a SPECIFIC argument for why it belongs in the portfolio');
-  lines.push('right now. The argument must connect what the fund holds to what is happening');
+  lines.push('For each fund, explain why it\'s a good fund RIGHT NOW given the current');
+  lines.push('economy. The argument must connect what the fund holds to what is happening');
   lines.push('in the world:');
   lines.push('  - Name actual companies or describe specific sector concentrations from the');
   lines.push('    Top Holdings data. Use actual weight percentages when they are notable.');
@@ -153,13 +185,13 @@ function buildLetterPrompt(scoredFunds, allocations, thesis, sectorScores, holdi
   lines.push('    means it profits directly from $105 oil."');
   lines.push('  - If a fund has no Top Holdings data, focus on its performance trend and');
   lines.push('    tier — do NOT apologize for missing data or say "limited visibility."');
-  lines.push('  - Each fund paragraph should make the reader think "oh, that makes sense"');
-  lines.push('    — not "that could describe any fund."');
+  lines.push('  - The argument for why a fund is good should be the SAME argument you would');
+  lines.push('    make at any risk level. Don\'t change the reasoning — only the allocation');
+  lines.push('    percentage changes.');
   lines.push('');
   lines.push('FINAL PARAGRAPH — SUMMARY:');
   lines.push('Explain what this combination gives the investor as a whole. What risks are');
-  lines.push('covered? What opportunities are captured? End with confidence — the reader');
-  lines.push('should feel this is a smart, well-reasoned set of choices.');
+  lines.push('covered? What opportunities are captured? End with confidence.');
   lines.push('');
   lines.push('VOICE:');
   lines.push('Main street, not Wall Street. Talk to the reader like they\'re a coworker');
@@ -192,6 +224,7 @@ function buildLetterPrompt(scoredFunds, allocations, thesis, sectorScores, holdi
 //   thesis       — thesis text string from thesis.js
 //   sectorScores — { 'Technology': { score, reason }, ... } from thesis.js
 //   holdingsMap  — { TICKER: { holdings, meta } } from edgar.js
+//   riskTolerance — integer 1–9 from user settings
 //   onProgress   — optional callback for pipeline overlay
 //
 // Returns: { letter: string } on success, { letter: null } on failure.
@@ -202,6 +235,7 @@ export async function generateInvestorLetter(
   thesis,
   sectorScores,
   holdingsMap,
+  riskTolerance,
   onProgress,
 ) {
   console.info('[letter] Starting investor letter generation…');
@@ -209,7 +243,7 @@ export async function generateInvestorLetter(
     onProgress({ step: 'letter', status: 'running', message: 'Writing investor letter…' });
   }
 
-  const prompt = buildLetterPrompt(scoredFunds, allocations, thesis, sectorScores, holdingsMap);
+  const prompt = buildLetterPrompt(scoredFunds, allocations, thesis, sectorScores, holdingsMap, riskTolerance);
 
   // ── Sequential discipline: 1.2s pre-call delay ────────────────────────────
   await sleep(PRE_CALL_DELAY_MS);
