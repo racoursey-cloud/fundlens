@@ -547,6 +547,34 @@ app.get('/api/finnhub/*', async (req, res) => {
   }
 });
 
+// --- Route 11b: OpenFIGI proxy (A13 --- CUSIP-to-ticker resolution) ----------
+// cusip.js POSTs batches of up to 100 CUSIPs to OpenFIGI for ticker resolution.
+// Free tier: 10 requests/minute, no API key required.
+// No server-side cache --- Supabase cusip_ticker_cache handles persistence (90-day TTL).
+app.post('/api/openfigi/*', async (req, res) => {
+  const suffix = req.params[0];           // e.g. "v3/mapping"
+  const url    = `https://api.openfigi.com/${suffix}`;
+
+  try {
+    const upstream = await proxyFetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(req.body),
+    });
+
+    if (!upstream.ok) {
+      const text = await upstream.text();
+      return res.status(upstream.status).json({ error: text });
+    }
+
+    const data = await upstream.json();
+    res.json(data);
+  } catch (err) {
+    console.error('[openfigi]', err.message);
+    res.status(502).json({ error: 'OpenFIGI proxy error', detail: err.message });
+  }
+});
+
 // \u2500\u2500\u2500 Route 12: Twelve Data proxy with 24h cache \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
 app.get('/api/twelvedata/*', async (req, res) => {
   if (!TWELVEDATA_KEY) {
