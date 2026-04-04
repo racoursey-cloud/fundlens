@@ -4,7 +4,9 @@
 //
 // Steps:
 //   1. Modified Z-Score on composite scores (money market excluded)
-//      Quality gates: below-median (modZ < 0) or low-data (≥4 fallbacks) → 0%
+//      Quality gate: low-data (≥4 fallbacks) → 0%
+//      No median gate — the exponential curve and capture threshold
+//      naturally starve low-scoring funds without a hard cliff.
 //   2. Exponential allocation: k = 0.1 + (riskTolerance × 0.20), weight = e^(k × Z)
 //   3. 30% per-fund hard cap with proportional redistribution
 //   4. Capture threshold: walk ranked allocations until cumulative weight
@@ -85,7 +87,6 @@ export function computeAllocations(scoredFunds, riskTolerance) {
     const modZ        = 0.6745 * (fund.composite - med) / safeMad;
     const fallbacks   = fund.dataQuality?.fallbackCount ?? 0;
     const isLowData   = fallbacks >= 4;
-    const belowMedian = modZ < 0;
 
     const tier = isLowData
       ? getTierFromModZ('LOW_DATA').label
@@ -96,7 +97,7 @@ export function computeAllocations(scoredFunds, riskTolerance) {
       composite: fund.composite,
       modZ,
       tier,
-      _excluded: belowMedian || isLowData,
+      _excluded: isLowData,
     };
   });
 
