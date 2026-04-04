@@ -11,6 +11,10 @@
 // Sequential batch processing with 13s delays between batches.
 // Scoped to top 30 holdings per fund by weight (quality.js only scores top 15).
 //
+// A15 Phase 2: Also detects fund-of-funds holdings (securityType2 indicates a
+// mutual fund) and sets h._is_underlying_fund = true for look-through scoring
+// in quality.js.
+//
 // ⚠️  No localStorage. No direct Supabase calls.
 // ⚠️  Sequential API calls with 6.5s delays between batches. Never Promise.all().
 // ⚠️  All API calls route through /api/openfigi proxy (server.js injects CORS).
@@ -78,6 +82,11 @@ function buildCusipIndex(holdingsMap) {
  * Applies a resolved CUSIP result to all holdings sharing that CUSIP.
  * Mutates holdings in place.
  *
+ * A15 Phase 2: Also detects fund-of-funds holdings via securityType2.
+ * OpenFIGI returns securityType2 values like "Open-End Fund", "Mutual Fund",
+ * "Closed-End Fund" for fund holdings. When detected, sets
+ * h._is_underlying_fund = true so quality.js can apply look-through scoring.
+ *
  * @param {Map}    cusipIndex — cusip → [holding, ...]
  * @param {string} cusip
  * @param {Object} result — { ticker, name, security_type, market_sector }
@@ -94,6 +103,19 @@ function applyResolution(cusipIndex, cusip, result) {
     // so isEquityHolding() can classify correctly
     h._resolved_security_type = result.security_type || null;
     h._resolved_market_sector = result.market_sector || null;
+
+    // A15 Phase 2: Detect fund holdings for look-through scoring.
+    // OpenFIGI securityType2 values for funds:
+    //   "Open-End Fund"   — mutual funds (most common)
+    //   "Mutual Fund"     — alternative label
+    //   "Closed-End Fund" — CEFs
+    // We do NOT flag ETFs ("ETP") — Finnhub covers ETF components directly.
+    const secType = (result.security_type || '').toLowerCase();
+    if (secType.includes('open-end fund') ||
+        secType.includes('mutual fund') ||
+        secType.includes('closed-end fund')) {
+      h._is_underlying_fund = true;
+    }
   }
 }
 
@@ -192,6 +214,7 @@ async function fetchOpenFigiBatch(cusipBatch) {
  * Resolves CUSIPs to tickers for holdings across all funds.
  * Mutates holding objects in place: sets h.holding_ticker when resolved.
  * Also sets h._resolved_security_type for downstream use by isEquityHolding().
+ * A15 Phase 2: Sets h._is_underlying_fund for fund-of-funds look-through.
  *
  * @param {Object} holdingsMap — { TICKER: { holdings: [...], meta } }
  * @param {Function} [onProgress] — Optional callback(completed, total)
