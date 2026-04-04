@@ -478,9 +478,20 @@ export async function getUserWeights(userId) {
  * weights: { mandate, momentum, risk_adj, manager_quality, risk_tolerance, ... }
  */
 export async function saveUserWeights(userId, weights) {
+  // Map camelCase store keys → snake_case DB columns.
+  // The store passes { sectorAlignment, momentum, holdingsQuality, risk_tolerance }.
+  // PostgREST rejects unknown column names with 400, so we must use exact DB names.
+  const row = {
+    user_id:           userId,
+    sector_alignment:  weights.sectorAlignment  ?? weights.sector_alignment  ?? 40,
+    momentum:          weights.momentum          ?? 30,
+    holdings_quality:  weights.holdingsQuality   ?? weights.holdings_quality  ?? 30,
+    risk_tolerance:    weights.risk_tolerance     ?? weights.riskTolerance     ?? 5,
+  };
+
   return supaFetch('user_weights?on_conflict=user_id', {
     method: 'POST',
-    body: JSON.stringify({ user_id: userId, ...weights }),
+    body: JSON.stringify(row),
     headers: {
       'Prefer': 'resolution=merge-duplicates,return=representation',
     },
