@@ -1,7 +1,11 @@
 /**
- * FundLens v5 \u2014 server/server.js
+ * FundLens v5 — server/server.js
  * Railway backend: serves built frontend, proxies all upstream API calls.
  * API keys are injected server-side and never reach the browser.
+ *
+ * A15: Added /api/fmp/* proxy route for FMP (Financial Modeling Prep) as a
+ * fallback fundamentals provider. Closes quality coverage gaps for
+ * international equities and small-cap stocks where Finnhub returns no data.
  */
 
 import express from 'express';
@@ -12,40 +16,42 @@ import { XMLParser } from 'fast-xml-parser';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 
-// \u2500\u2500\u2500 Environment \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+// ─── Environment ─────────────────────────────────────────────────────────────
 const {
   ANTHROPIC_KEY,
-  TINNGO_KEY,       // intentional typo \u2014 do not change
+  TINNGO_KEY,       // intentional typo — do not change
   FRED_KEY,
   FINNHUB_KEY,
   TWELVEDATA_KEY,
+  FMP_KEY,          // A15: Financial Modeling Prep — quality data fallback
   SUPA_URL,
   SUPA_KEY,
   SUPA_ANON_KEY,
   PORT = 3000,
 } = process.env;
 
-// \u2500\u2500\u2500 Middleware \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+// ─── Middleware ──────────────────────────────────────────────────────────────
 app.use(express.json({ limit: '5mb' }));
 app.use(express.static(path.join(__dirname, '../dist')));
 
-// \u2500\u2500\u2500 In-memory caches \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+// ─── In-memory caches ────────────────────────────────────────────────────────
 // Each entry: { value, expiresAt }
-const tiingoCache  = {};  // key: `${ticker}|${qs}` \u2014 expires at ET midnight
-const fredCache    = {};  // key: path+qs \u2014 24h TTL
-const treasuryCache = {}; // single key 'yield' \u2014 24h TTL
-const rssCache     = {};  // key: url \u2014 30min TTL
-const twelveCache  = {};  // key: path+qs \u2014 24h TTL
-const finnhubCache = {};  // key: path+qs \u2014 24h TTL (A14)
+const tiingoCache  = {};  // key: `${ticker}|${qs}` — expires at ET midnight
+const fredCache    = {};  // key: path+qs — 24h TTL
+const treasuryCache = {}; // single key 'yield' — 24h TTL
+const rssCache     = {};  // key: url — 30min TTL
+const twelveCache  = {};  // key: path+qs — 24h TTL
+const finnhubCache = {};  // key: path+qs — 24h TTL (A14)
+const fmpCache     = {};  // key: path+qs — 24h TTL (A15)
 
 // GDELT rate-limit state
 let gdeltLastCall = 0;
 const GDELT_MIN_INTERVAL_MS = 5000;
 
-// \u2500\u2500\u2500 Helpers \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+// ─── Helpers ─────────────────────────────────────────────────────────────────
 
 /**
- * proxyFetch \u2014 wraps native fetch with a 25-second AbortController timeout.
+ * proxyFetch — wraps native fetch with a 25-second AbortController timeout.
  */
 async function proxyFetch(url, options = {}) {
   const controller = new AbortController();
@@ -59,7 +65,7 @@ async function proxyFetch(url, options = {}) {
 }
 
 /**
- * todayET \u2014 returns today's date in Eastern Time as "YYYY-MM-DD".
+ * todayET — returns today's date in Eastern Time as "YYYY-MM-DD".
  */
 function todayET() {
   return new Date()
@@ -100,7 +106,7 @@ function cacheGetStale(store, key) {
   return store[key]?.value ?? null;
 }
 
-// \u2500\u2500\u2500 Route 1: Claude proxy \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+// ─── Route 1: Claude proxy ──────────────────────────────────────────────────
 app.post('/api/claude', async (req, res) => {
   try {
     const upstream = await proxyFetch('https://api.anthropic.com/v1/messages', {
@@ -121,7 +127,7 @@ app.post('/api/claude', async (req, res) => {
   }
 });
 
-// \u2500\u2500\u2500 Route 2: Tiingo proxy with ET-day cache \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+// ─── Route 2: Tiingo proxy with ET-day cache ────────────────────────────────
 app.get('/api/tiingo/*', async (req, res) => {
   const suffix = req.params[0];                       // everything after /api/tiingo/
   const qs     = new URLSearchParams(req.query).toString();
@@ -139,7 +145,7 @@ app.get('/api/tiingo/*', async (req, res) => {
     if (upstream.status === 429) {
       const stale = cacheGetStale(tiingoCache, cacheKey);
       if (stale) {
-        console.warn('[tiingo] 429 \u2014 serving stale cache for', cacheKey);
+        console.warn('[tiingo] 429 — serving stale cache for', cacheKey);
         return res.json(stale);
       }
       return res.status(429).json({ error: 'Tiingo rate limited, no cache available' });
@@ -157,7 +163,7 @@ app.get('/api/tiingo/*', async (req, res) => {
   } catch (err) {
     const stale = cacheGetStale(tiingoCache, cacheKey);
     if (stale) {
-      console.warn('[tiingo] error \u2014 serving stale cache:', err.message);
+      console.warn('[tiingo] error — serving stale cache:', err.message);
       return res.json(stale);
     }
     console.error('[tiingo]', err.message);
@@ -165,8 +171,8 @@ app.get('/api/tiingo/*', async (req, res) => {
   }
 });
 
-// \u2500\u2500\u2500 Route 3: Supabase REST proxy \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
-// Handles GET, POST, PATCH, DELETE \u2014 forwards Prefer header for upsert/return
+// ─── Route 3: Supabase REST proxy ───────────────────────────────────────────
+// Handles GET, POST, PATCH, DELETE — forwards Prefer header for upsert/return
 ['get', 'post', 'patch', 'delete'].forEach((method) => {
   app[method]('/api/supabase/*', async (req, res) => {
     const suffix = req.params[0];
@@ -209,7 +215,7 @@ app.get('/api/tiingo/*', async (req, res) => {
   });
 });
 
-// \u2500\u2500\u2500 Route 4: FRED proxy with 24h cache \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+// ─── Route 4: FRED proxy with 24h cache ─────────────────────────────────────
 app.get('/api/fred/*', async (req, res) => {
   const suffix   = req.params[0];
   const qs       = new URLSearchParams({ ...req.query, api_key: FRED_KEY, file_type: 'json' }).toString();
@@ -236,7 +242,7 @@ app.get('/api/fred/*', async (req, res) => {
   }
 });
 
-// \u2500\u2500\u2500 Route 5: Treasury yield curve \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+// ─── Route 5: Treasury yield curve ──────────────────────────────────────────
 const TREASURY_CSV_URL =
   'https://home.treasury.gov/resource-center/data-chart-center/interest-rates/daily-treasury-rates.csv/2024/all?type=daily_treasury_yield_curve&field_tdr_date_value=2024&download=true';
 
@@ -296,14 +302,14 @@ app.get('/api/treasury', async (req, res) => {
   // Serve stale on error
   const stale = cacheGetStale(treasuryCache, 'yield');
   if (stale) {
-    console.warn('[treasury] error \u2014 serving stale cache');
+    console.warn('[treasury] error — serving stale cache');
     return res.json(stale);
   }
 
   res.status(502).json({ error: 'Treasury data unavailable' });
 });
 
-// \u2500\u2500\u2500 Route 6: RSS proxy \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+// ─── Route 6: RSS proxy ────────────────────────────────────────────────────
 const RSS_WHITELIST = [
   'feeds.content.dowjones.io',
   'search.cnbc.com',
@@ -385,7 +391,7 @@ app.get('/api/rss', async (req, res) => {
   } catch (err) {
     const stale = cacheGetStale(rssCache, feedUrl);
     if (stale) {
-      console.warn('[rss] error \u2014 serving stale:', err.message);
+      console.warn('[rss] error — serving stale:', err.message);
       return res.json(stale);
     }
     console.error('[rss]', err.message);
@@ -393,7 +399,7 @@ app.get('/api/rss', async (req, res) => {
   }
 });
 
-// \u2500\u2500\u2500 Route 7: GDELT proxy (rate-limited to 1 req/5s) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+// ─── Route 7: GDELT proxy (rate-limited to 1 req/5s) ───────────────────────
 app.get('/api/gdelt', async (req, res) => {
   const now = Date.now();
   if (now - gdeltLastCall < GDELT_MIN_INTERVAL_MS) {
@@ -445,7 +451,7 @@ app.get('/api/gdelt', async (req, res) => {
   }
 });
 
-// \u2500\u2500\u2500 SEC helper \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+// ─── SEC helper ─────────────────────────────────────────────────────────────
 const SEC_HEADERS = {
   'User-Agent': 'FundLens/5.0 support@fundlens.app',
   'Accept':     'application/json',
@@ -473,7 +479,7 @@ async function secProxy(res, url) {
   }
 }
 
-// \u2500\u2500\u2500 Route 8: EDGAR proxy \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+// ─── Route 8: EDGAR proxy ───────────────────────────────────────────────────
 app.get('/api/edgar/*', async (req, res) => {
   const suffix = req.params[0];
   const qs     = new URLSearchParams(req.query).toString();
@@ -481,8 +487,8 @@ app.get('/api/edgar/*', async (req, res) => {
   await secProxy(res, url);
 });
 
-// \u2500\u2500\u2500 Route 9: EFTS (SEC full-text search) proxy \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
-// edgar.js calls /api/efts/LATEST/search-index \u2014 suffix captures "LATEST/search-index".
+// ─── Route 9: EFTS (SEC full-text search) proxy ─────────────────────────────
+// edgar.js calls /api/efts/LATEST/search-index — suffix captures "LATEST/search-index".
 // Base URL must NOT include /LATEST/ to avoid doubling the path segment.
 app.get('/api/efts/*', async (req, res) => {
   const suffix = req.params[0];
@@ -491,7 +497,7 @@ app.get('/api/efts/*', async (req, res) => {
   await secProxy(res, url);
 });
 
-// \u2500\u2500\u2500 Route 10: www.sec.gov proxy \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+// ─── Route 10: www.sec.gov proxy ────────────────────────────────────────────
 app.get('/api/www4sec/*', async (req, res) => {
   const suffix = req.params[0];
   const qs     = new URLSearchParams(req.query).toString();
@@ -499,11 +505,11 @@ app.get('/api/www4sec/*', async (req, res) => {
   await secProxy(res, url);
 });
 
-// \u2500\u2500\u2500 Route 11: Finnhub proxy with 24h cache (A14) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
-// quality.js makes up to 300 Finnhub calls (15 per fund \u00d7 20 funds).
+// ─── Route 11: Finnhub proxy with 24h cache (A14) ──────────────────────────
+// quality.js makes up to 300 Finnhub calls (15 per fund × 20 funds).
 // Free tier = 60/min. Server-side cache prevents repeat fetches within 24h.
 // Many funds share top holdings (AAPL, MSFT, NVDA) so same symbols get
-// requested across funds \u2014 cache deduplicates these automatically.
+// requested across funds — cache deduplicates these automatically.
 app.get('/api/finnhub/*', async (req, res) => {
   const suffix   = req.params[0];
   const qs       = new URLSearchParams({ ...req.query, token: FINNHUB_KEY }).toString();
@@ -518,10 +524,10 @@ app.get('/api/finnhub/*', async (req, res) => {
     const upstream = await proxyFetch(url);
 
     if (upstream.status === 429) {
-      // Rate limited \u2014 try to serve stale cache if available
+      // Rate limited — try to serve stale cache if available
       const stale = cacheGetStale(finnhubCache, cacheKey);
       if (stale) {
-        console.warn('[finnhub] 429 \u2014 serving stale cache for', cacheKey);
+        console.warn('[finnhub] 429 — serving stale cache for', cacheKey);
         return res.json(stale);
       }
       return res.status(429).json({ error: 'Finnhub rate limited, no cache available' });
@@ -539,7 +545,7 @@ app.get('/api/finnhub/*', async (req, res) => {
     // On network error, try to serve stale cache
     const stale = cacheGetStale(finnhubCache, cacheKey);
     if (stale) {
-      console.warn('[finnhub] error \u2014 serving stale cache:', err.message);
+      console.warn('[finnhub] error — serving stale cache:', err.message);
       return res.json(stale);
     }
     console.error('[finnhub]', err.message);
@@ -575,7 +581,56 @@ app.post('/api/openfigi/*', async (req, res) => {
   }
 });
 
-// \u2500\u2500\u2500 Route 12: Twelve Data proxy with 24h cache \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+// ─── Route 11c: FMP proxy with 24h cache (A15 — quality data fallback) ──────
+// quality.js calls FMP as a fallback when Finnhub returns no data for a ticker.
+// Closes coverage gaps for international equities and small/micro-cap stocks.
+// Free tier: 250 calls/day. Server-side 24h cache deduplicates shared holdings.
+// Supabase fmp_cache (7-day TTL) provides cross-run persistence.
+app.get('/api/fmp/*', async (req, res) => {
+  if (!FMP_KEY) {
+    return res.status(503).json({ error: 'FMP_KEY not configured' });
+  }
+
+  const suffix   = req.params[0];           // e.g. "v3/key-metrics-ttm/AAPL"
+  const qs       = new URLSearchParams({ ...req.query, apikey: FMP_KEY }).toString();
+  const cacheKey = `${suffix}|${qs}`;
+
+  const cached = cacheGet(fmpCache, cacheKey);
+  if (cached) return res.json(cached);
+
+  try {
+    const url = `https://financialmodelingprep.com/api/${suffix}?${qs}`;
+    const upstream = await proxyFetch(url);
+
+    if (upstream.status === 429) {
+      const stale = cacheGetStale(fmpCache, cacheKey);
+      if (stale) {
+        console.warn('[fmp] 429 — serving stale cache for', cacheKey);
+        return res.json(stale);
+      }
+      return res.status(429).json({ error: 'FMP rate limited, no cache available' });
+    }
+
+    if (!upstream.ok) {
+      const text = await upstream.text();
+      return res.status(upstream.status).json({ error: text });
+    }
+
+    const data = await upstream.json();
+    cacheSet(fmpCache, cacheKey, data, 24 * 60 * 60 * 1000);  // 24h TTL
+    res.json(data);
+  } catch (err) {
+    const stale = cacheGetStale(fmpCache, cacheKey);
+    if (stale) {
+      console.warn('[fmp] error — serving stale cache:', err.message);
+      return res.json(stale);
+    }
+    console.error('[fmp]', err.message);
+    res.status(502).json({ error: 'FMP proxy error', detail: err.message });
+  }
+});
+
+// ─── Route 12: Twelve Data proxy with 24h cache ────────────────────────────
 app.get('/api/twelvedata/*', async (req, res) => {
   if (!TWELVEDATA_KEY) {
     return res.status(503).json({ error: 'TWELVEDATA_KEY not configured' });
@@ -606,7 +661,7 @@ app.get('/api/twelvedata/*', async (req, res) => {
   }
 });
 
-// \u2500\u2500\u2500 Route 13: Health check \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+// ─── Route 13: Health check ─────────────────────────────────────────────────
 async function checkService(name, checkFn) {
   const start = Date.now();
   try {
@@ -659,6 +714,13 @@ app.get('/health', async (req, res) => {
           ),
         ]
       : []),
+    ...(FMP_KEY
+      ? [
+          checkService('fmp', () =>
+            proxyFetch(`https://financialmodelingprep.com/api/v3/stock/list?apikey=${FMP_KEY}`)
+          ),
+        ]
+      : []),
   ]);
 
   const merged = Object.assign({}, ...checks);
@@ -672,12 +734,12 @@ app.get('/health', async (req, res) => {
   });
 });
 
-// \u2500\u2500\u2500 Route 14: SPA catch-all \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+// ─── Route 14: SPA catch-all ────────────────────────────────────────────────
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, '../dist/index.html'));
 });
 
-// \u2500\u2500\u2500 Start \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+// ─── Start ──────────────────────────────────────────────────────────────────
 app.listen(PORT, () => {
   console.log(`[FundLens v5] Server running on port ${PORT}`);
   console.log(`[FundLens v5] Trading date (ET): ${todayET()}`);
@@ -685,6 +747,9 @@ app.listen(PORT, () => {
   const missing = ['ANTHROPIC_KEY', 'TINNGO_KEY', 'FRED_KEY', 'SUPA_URL', 'SUPA_KEY']
     .filter((k) => !process.env[k]);
   if (missing.length) {
-    console.warn('[FundLens v5] WARNING \u2014 missing env vars:', missing.join(', '));
+    console.warn('[FundLens v5] WARNING — missing env vars:', missing.join(', '));
   }
+
+  // A15: Optional providers — warn but don't block startup
+  if (!FMP_KEY) console.warn('[FundLens v5] FMP_KEY not set — quality fallback disabled');
 });
