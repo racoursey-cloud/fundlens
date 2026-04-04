@@ -140,9 +140,10 @@ export const QUALITY_CONFIDENCE = {
 
 // ---------------------------------------------------------------------------
 // Allocation Limits — capture-threshold fund count control
-// After exponential weighting and 30% cap, walk down ranked allocations
-// until cumulative weight hits a risk-scaled target. Guardrails clamp
-// the fund count to [minFunds, maxFunds].
+// After risk-scaled position cap (25–45%) and exponential weighting,
+// walk down ranked allocations until cumulative weight hits a risk-scaled
+// target. Fund count is fully data-driven — the cap and capture threshold
+// work together to produce the right number of funds organically.
 //
 // Research basis:
 //   O'Neal 1997 — 4 funds halves terminal wealth dispersion
@@ -153,11 +154,12 @@ export const QUALITY_CONFIDENCE = {
 export const ALLOCATION_LIMITS = {
   captureHigh:  65,   // cumulative weight target (%) at risk 1
   captureStep:   3,   // target drops by this per risk notch
-  minFunds:      3,   // hard floor — never fewer than 3
-  maxFunds:      7,   // hard ceiling — never more than 7
-  // risk 1 → target 65%  →  ~7 funds (flat curve, each ~9%)
-  // risk 5 → target 53%  →  ~5 funds (moderate curve)
-  // risk 9 → target 41%  →  ~3 funds (steep curve, top 3 ≈ 52%)
+  // Fund count is fully data-driven — no artificial floor or ceiling.
+  // The risk-scaled position cap (25% at risk 1, 45% at risk 9) provides
+  // a natural floor; the capture threshold provides a natural ceiling.
+  //   risk 1 → target 65%, cap 25%  →  ~7 funds
+  //   risk 5 → target 53%, cap 35%  →  ~5 funds
+  //   risk 9 → target 41%, cap 45%  →  ~3 funds
 };
 
 // ---------------------------------------------------------------------------
