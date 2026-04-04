@@ -132,7 +132,7 @@ async function fetchFinnhubMetrics(ticker) {
  *   +1 if profit margin > 0
  *   +1 if debt/equity < 1.0
  *   +1 if revenue growth > 0
- *   +1 if operating cash flow > 0 (if available)
+ *   +1 if free cash flow > 0 (if available)
  */
 function piotroskiLite(metrics) {
   let points = 0;
@@ -166,14 +166,13 @@ function piotroskiLite(metrics) {
     if (revGrowth > 0) points++;
   }
 
-  // Operating cash flow
-  const ocf = metrics.currentRatioQuarterly ?? null; // Finnhub may not have raw OCF
-  // Try free cash flow as a proxy for positive cash generation
+  // Cash flow (Piotroski: CFO > 0)
+  // currentRatioQuarterly is a liquidity ratio, not a cash flow measure — removed.
+  // Free cash flow is the closest available proxy from Finnhub free tier.
   const fcf = metrics.freeCashFlowTTM ?? metrics.freeCashFlowPerShareTTM ?? null;
-  const cashMetric = fcf ?? ocf;
-  if (cashMetric != null) {
+  if (fcf != null) {
     available++;
-    if (cashMetric > 0) points++;
+    if (fcf > 0) points++;
   }
 
   return { points, available };
