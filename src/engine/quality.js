@@ -1,8 +1,12 @@
 // src/engine/quality.js
-// Holdings quality scoring engine for FundLens v5.1 (Assignment A4).
+// Holdings quality scoring engine for FundLens v5.1 (Assignment A4, A13).
 //
 // Pipeline step 6 input: holdings from edgar.js (enriched by classify.js),
 // plus Finnhub fundamentals for top equity holdings.
+//
+// A13: Before scoring, resolves CUSIPs to tickers via cusip.js for holdings
+// that lack tickers (Fidelity, Vanguard, Allspring, etc.). This enables
+// Finnhub lookups for ~45% of funds that were previously scoring 5.0 fallback.
 //
 // Two scoring paths by holding type:
 //   Equity  → Piotroski-lite (5 binary checks on Finnhub fundamentals)
@@ -25,6 +29,7 @@
 
 import { apiFetch } from '../services/api.js';
 import { getFinnhubCache, saveFinnhubCache } from '../services/cache.js';
+import { resolveCusipTickers } from './cusip.js';
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -97,6 +102,11 @@ function isEquityHolding(holding) {
   const at = (holding.asset_type || '').toUpperCase();
   if (at === 'EC' || at === 'EP') return true;  // equity common, equity preferred
   if (at === 'DBT' || at === 'ABS' || at === 'STIV') return false; // debt, ABS, short-term
+
+  // A13: OpenFIGI-resolved security type (set by cusip.js)
+  const resolved = (holding._resolved_security_type || '').toLowerCase();
+  if (resolved.includes('common stock') || resolved.includes('preferred')) return true;
+  if (resolved.includes('bond') || resolved.includes('note') || resolved.includes('bill')) return false;
 
   // If no explicit markers, treat as equity if it has a ticker and no debt flag
   if (holding.holding_ticker && !holding.is_debt) return true;
@@ -372,6 +382,18 @@ export async function computeHoldingsQuality(holdingsMap, onProgress) {
   if (!holdingsMap || typeof holdingsMap !== 'object') return results;
 
   const tickers = Object.keys(holdingsMap);
+
+  // ── A13: Pre-step — Resolve CUSIPs to tickers for holdings missing tickers ─
+  // Must run BEFORE the equity ticker collection below so that newly-resolved
+  // tickers are included in the Finnhub cache pre-population and scoring.
+  try {
+    const cusipResult = await resolveCusipTickers(holdingsMap);
+    console.log(`[quality] CUSIP resolution: ${cusipResult.resolved} tickers resolved ` +
+      `(${cusipResult.cached} cached, ${cusipResult.apiCalls} API calls, ` +
+      `${cusipResult.notFound} not found)`);
+  } catch (err) {
+    console.warn('[quality] CUSIP resolution failed, continuing with available tickers:', err.message);
+  }
 
   // ── Pre-populate Finnhub cache from Supabase ──────────────────────────────
   // Collect all unique equity tickers across all funds' top-15 holdings,
