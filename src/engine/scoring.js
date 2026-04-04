@@ -469,9 +469,22 @@ export function calcCompositeScores(
   standardizeFactor(scorable, 'holdingsQuality');
 
   // ── COMPOSITE FROM Z-SCORES ───────────────────────────────────────────────
-  // Weighted z-composite → CDF mapping back to 1–10 scale.
+  // Weighted z-composite → apply modifiers in z-space → CDF mapping to 1–10.
   // This ensures each factor contributes proportionally to its nominal weight
   // regardless of its raw score distribution spread.
+  //
+  // CRITICAL: Modifiers (expense, flow, concentration, turnover) are applied
+  // in z-space BEFORE the CDF mapping, not after on the 1–10 scale.
+  // This prevents the CDF's tail compression from pushing funds below the
+  // 1.0 floor and collapsing distinct profiles into identical clamped scores.
+  //
+  // Conversion: at z=0, d/dz [1 + 9Φ(z)] = 9φ(0) = 9/√(2π) ≈ 3.5899.
+  // So z_modifier = old_modifier / 3.5899 produces equivalent impact at the
+  // center of the distribution. At the tails, impact is naturally attenuated
+  // by the CDF's flattening — this is desirable (extreme funds are less
+  // sensitive to small modifiers).
+
+  const Z_SCALE = 9 / Math.sqrt(2 * Math.PI);   // ≈ 3.5899
 
   for (const f of results) {
     if (f.isMoneyMarket) continue;
@@ -482,13 +495,17 @@ export function calcCompositeScores(
 
     const zComposite = zSA * f._adjW1 + zM * f._adjW2 + zHQ * f._adjW3;
 
-    // Map z-composite back to 1–10 via CDF (same S-curve as momentum uses)
-    const mappedScore = 1 + 9 * normalCDF(zComposite);
+    // Apply modifiers in z-space (converted from 1–10 scale calibration)
+    const zAdjusted = zComposite
+      - (f.concentrationPenalty / Z_SCALE)
+      + (f.expenseModifier     / Z_SCALE)
+      + (f.flowModifier        / Z_SCALE)
+      + (f.turnoverModifier    / Z_SCALE);
 
-    f.composite = parseFloat(clamp(
-      mappedScore - f.concentrationPenalty + f.expenseModifier + f.flowModifier + f.turnoverModifier,
-      1.0, 10.0
-    ).toFixed(3));
+    // Map adjusted z-composite to 1–10 via CDF (same S-curve as momentum)
+    const mappedScore = 1 + 9 * normalCDF(zAdjusted);
+
+    f.composite = parseFloat(clamp(mappedScore, 1.0, 10.0).toFixed(3));
 
     // Clean up internal-only fields
     delete f.sectorAlignment_z;
