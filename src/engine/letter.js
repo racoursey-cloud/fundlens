@@ -36,10 +36,10 @@ function sleep(ms) {
 // ---------------------------------------------------------------------------
 // buildLetterPrompt
 // ---------------------------------------------------------------------------
-// Assembles the full prompt from scored funds, allocations, thesis, and
-// sector scores. Designed for non-finance 401K investors.
+// Assembles the full prompt from scored funds, allocations, thesis, sector
+// scores, and holdingsMap. Designed for non-finance 401K investors.
 
-function buildLetterPrompt(scoredFunds, allocations, thesis, sectorScores) {
+function buildLetterPrompt(scoredFunds, allocations, thesis, sectorScores, holdingsMap) {
   const lines = [];
 
   // ── Context header ────────────────────────────────────────────────────────
@@ -86,8 +86,14 @@ function buildLetterPrompt(scoredFunds, allocations, thesis, sectorScores) {
     .filter(f => !f.isMoneyMarket)
     .slice(0, 8);
 
+  // Build a set of allocated tickers for quick lookup.
+  const allocatedTickers = new Set(
+    (allocations ?? []).filter(a => a.allocation_pct > 0).map(a => a.ticker)
+  );
+
   for (const f of displayFunds) {
-    lines.push(`  ${f.ticker} (${f.name ?? ''})`);
+    const isAlloc = allocatedTickers.has(f.ticker);
+    lines.push(`  ${f.ticker} (${f.name ?? ''})${isAlloc ? ' [RECOMMENDED]' : ''}`);
     lines.push(`    Composite: ${f.composite?.toFixed(2) ?? 'N/A'}`);
     lines.push(`    Positioning: ${f.sectorAlignment?.toFixed(2) ?? 'N/A'}`);
     lines.push(`    Momentum: ${f.momentum?.toFixed(2) ?? 'N/A'}`);
@@ -103,27 +109,69 @@ function buildLetterPrompt(scoredFunds, allocations, thesis, sectorScores) {
     if (flags.length > 0) {
       lines.push(`    Data caveats: ${flags.join('; ')}`);
     }
+
+    // Top holdings for allocated funds — gives Claude concrete composition data.
+    if (isAlloc && holdingsMap) {
+      const raw      = holdingsMap[f.ticker];
+      const holdings = Array.isArray(raw) ? raw : (raw?.holdings ?? []);
+      const top10    = holdings
+        .filter(h => h.weight > 0)
+        .sort((a, b) => (b.weight || 0) - (a.weight || 0))
+        .slice(0, 10);
+      if (top10.length > 0) {
+        lines.push('    Top holdings:');
+        for (const h of top10) {
+          const sector = h.sector || h.gics_sector || h.sectorName || '';
+          lines.push(`      ${h.name ?? h.cusip ?? '?'}: ${h.weight?.toFixed(1)}%${sector ? ` (${sector})` : ''}`);
+        }
+      }
+    }
+
     lines.push('');
   }
 
   // ── Writing instructions ──────────────────────────────────────────────────
   lines.push('=== WRITING INSTRUCTIONS ===');
-  lines.push('Write a concise investor letter (300–500 words) for 401K plan participants.');
-  lines.push('The audience is NOT finance professionals — use plain language, no jargon.');
+  lines.push('Write a clear, approachable investor letter (400–600 words) for people');
+  lines.push('managing their own 401K. These are NOT finance professionals.');
   lines.push('');
-  lines.push('The letter must:');
-  lines.push('1. Open with a brief summary of the current economic environment and macro thesis.');
-  lines.push('2. Name the top 3–5 recommended funds with their allocation percentages.');
-  lines.push('3. For each recommended fund, explain WHY it is favored — which scoring');
-  lines.push('   factors (Positioning, Momentum, Quality) drove its score. Be specific.');
-  lines.push('4. Note any data quality caveats that investors should be aware of.');
-  lines.push('5. Close with a clear, actionable "here\'s what to do" paragraph.');
+  lines.push('The letter must follow this exact structure:');
   lines.push('');
-  lines.push('Tone: confident but approachable. Think "trusted coworker who reads the');
-  lines.push('financial news so you don\'t have to."');
+  lines.push('PARAGRAPH 1 — INTRODUCTION:');
+  lines.push('Open by naming the recommended funds (the ones marked [RECOMMENDED] above)');
+  lines.push('with their allocation percentages. Briefly state what the current economic');
+  lines.push('environment looks like and why these particular funds make sense right now.');
+  lines.push('Make the reader feel oriented — they should immediately know what you are');
+  lines.push('recommending and roughly why.');
   lines.push('');
-  lines.push('Do NOT use bullet points or numbered lists in the letter body — write in');
-  lines.push('flowing paragraphs. Fund names and percentages can be inline.');
+  lines.push('PARAGRAPHS 2–N — ONE PARAGRAPH PER RECOMMENDED FUND:');
+  lines.push('For each recommended fund, write 2–3 sentences explaining why THIS specific');
+  lines.push('fund is on the list. Be concrete:');
+  lines.push('  - Reference what the fund actually holds (use the Top Holdings data above).');
+  lines.push('    For example: "This fund has significant positions in [companies/sectors],');
+  lines.push('    which are benefiting from [specific trend or condition]."');
+  lines.push('  - Explain how the fund\'s composition connects to the current economic');
+  lines.push('    environment described in the thesis.');
+  lines.push('  - If the fund has strong momentum, say what that means in plain terms');
+  lines.push('    (e.g., "it has been gaining ground steadily over recent months").');
+  lines.push('  - Do NOT just say "it scored well on positioning" — explain WHAT about its');
+  lines.push('    positioning makes it a good choice right now.');
+  lines.push('');
+  lines.push('FINAL PARAGRAPH — SUMMARY:');
+  lines.push('Wrap up by explaining how these funds work together as a group. Why does');
+  lines.push('this combination make sense? What balance or diversification does it provide?');
+  lines.push('End with a confident, reassuring note — the reader should feel comfortable');
+  lines.push('with the recommendation.');
+  lines.push('');
+  lines.push('TONE AND STYLE:');
+  lines.push('- Write like a helpful coworker who happens to follow the markets closely.');
+  lines.push('- No financial jargon. If you must use a term like "momentum" or "sector');
+  lines.push('  exposure," briefly explain what it means in context.');
+  lines.push('- No bullet points or numbered lists — write in flowing paragraphs.');
+  lines.push('- Fund tickers and percentages can appear inline in the prose.');
+  lines.push('- Be specific and concrete, never vague or generic.');
+  lines.push('- The reader should finish the letter understanding WHY each fund was chosen,');
+  lines.push('  not just THAT it was chosen.');
   lines.push('');
   lines.push('Respond with ONLY the letter text. No JSON, no markdown fences, no preamble.');
 
@@ -140,6 +188,7 @@ function buildLetterPrompt(scoredFunds, allocations, thesis, sectorScores) {
 //   allocations  — from outlier.js (each: { ticker, allocation_pct, tier })
 //   thesis       — thesis text string from thesis.js
 //   sectorScores — { 'Technology': { score, reason }, ... } from thesis.js
+//   holdingsMap  — { TICKER: { holdings, meta } } from edgar.js
 //   onProgress   — optional callback for pipeline overlay
 //
 // Returns: { letter: string } on success, { letter: null } on failure.
@@ -149,6 +198,7 @@ export async function generateInvestorLetter(
   allocations,
   thesis,
   sectorScores,
+  holdingsMap,
   onProgress,
 ) {
   console.info('[letter] Starting investor letter generation…');
@@ -156,7 +206,7 @@ export async function generateInvestorLetter(
     onProgress({ step: 'letter', status: 'running', message: 'Writing investor letter…' });
   }
 
-  const prompt = buildLetterPrompt(scoredFunds, allocations, thesis, sectorScores);
+  const prompt = buildLetterPrompt(scoredFunds, allocations, thesis, sectorScores, holdingsMap);
 
   // ── Sequential discipline: 1.2s pre-call delay ────────────────────────────
   await sleep(PRE_CALL_DELAY_MS);
@@ -167,7 +217,7 @@ export async function generateInvestorLetter(
       const response = await callClaude({
         model:      SONNET_MODEL,
         max_tokens: 2000,
-        system:     'You are a clear, confident financial communicator who explains investment strategy in plain language. You never use jargon. You write for busy people who want to know what to do with their 401K.',
+        system:     'You are a clear, down-to-earth writer who explains investment choices in plain language. You write for everyday people who want to understand what to do with their 401K and, more importantly, why. You never use jargon. You are specific and concrete — you reference actual fund holdings and real economic conditions, not abstract scores or vague generalities.',
         messages:   [{ role: 'user', content: prompt }],
       });
 
