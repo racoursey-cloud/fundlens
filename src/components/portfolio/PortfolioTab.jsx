@@ -18,6 +18,7 @@ import {
   FACTOR_LABELS,
   FACTOR_KEYS,
   DEFAULT_WEIGHTS,
+  ALLOCATION_LIMITS,
   getTierFromModZ,
 } from '../../engine/constants.js';
 
@@ -856,31 +857,55 @@ export default function PortfolioTab() {
                   : 'Allocation tilts sharply toward the highest-scoring funds. Greater upside potential, higher variance.'}
               </div>
 
-              {/* Allocation curve visualisation — simple 9-step bar */}
+              {/* Allocation curve visualisation — capture-threshold-aware */}
               <div style={{ marginTop: '16px' }}>
                 <div style={{ fontSize: '10px', color: '#4b5563', marginBottom: '6px' }}>
                   Allocation curve shape
                 </div>
                 <div style={{ display: 'flex', gap: '3px', alignItems: 'flex-end', height: '28px' }}>
-                  {Array.from({ length: 9 }, (_, i) => {
-                    const k      = 0.1 + (riskTolerance * 0.20);
-                    const score  = 9 - i;  // highest score first
-                    const raw    = Math.exp(k * score);
-                    const maxRaw = Math.exp(k * 9);
-                    const h      = Math.max(4, Math.round((raw / maxRaw) * 28));
-                    return (
-                      <div
-                        key={i}
-                        style={{
-                          flex:         1,
-                          height:       `${h}px`,
-                          background:   i < 3 ? '#3b82f6' : '#25282e',
-                          borderRadius: '2px',
-                          transition:   'height 0.25s ease',
-                        }}
-                      />
-                    );
-                  })}
+                  {(() => {
+                    // Simulate capture threshold walk to determine kept fund count.
+                    const k = 0.1 + (riskTolerance * 0.20);
+
+                    // 1. Generate 9 hypothetical allocations via exponential curve.
+                    const raw = Array.from({ length: 9 }, (_, i) => Math.exp(k * (9 - i)));
+                    const rawSum = raw.reduce((s, v) => s + v, 0);
+                    const pcts = raw.map(v => (v / rawSum) * 100);       // normalised to 100
+
+                    // 2. Walk cumulative until hitting the risk-scaled capture target.
+                    const { captureHigh, captureStep, minFunds, maxFunds } = ALLOCATION_LIMITS;
+                    const target = captureHigh - (riskTolerance - 1) * captureStep;
+                    let cum = 0;
+                    let kept = 0;
+                    for (let i = 0; i < 9; i++) {
+                      cum += pcts[i];
+                      kept++;
+                      if (cum >= target) break;
+                    }
+
+                    // 3. Clamp to [minFunds, maxFunds].
+                    kept = Math.max(minFunds, Math.min(maxFunds, kept));
+
+                    // 4. Render bars: kept bars at full blue, trimmed at 10% opacity.
+                    const maxRaw = raw[0];
+                    return Array.from({ length: 9 }, (_, i) => {
+                      const h      = Math.max(4, Math.round((raw[i] / maxRaw) * 28));
+                      const isKept = i < kept;
+                      return (
+                        <div
+                          key={i}
+                          style={{
+                            flex:         1,
+                            height:       `${h}px`,
+                            background:   '#3b82f6',
+                            opacity:      isKept ? 1 : 0.1,
+                            borderRadius: '2px',
+                            transition:   'height 0.25s ease, opacity 0.25s ease',
+                          }}
+                        />
+                      );
+                    });
+                  })()}
                 </div>
               </div>
             </div>
