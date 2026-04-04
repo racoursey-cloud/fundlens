@@ -1,15 +1,29 @@
 // src/engine/quality.js
-// Holdings quality scoring engine for FundLens v5.1 (Assignment A4, A13).
+// Holdings quality scoring engine for FundLens v5.1 (Assignment A4, A13, A15).
 //
 // Pipeline step 6 input: holdings from edgar.js (enriched by classify.js),
-// plus Finnhub fundamentals for top equity holdings.
+// plus fundamentals for top equity holdings from Finnhub (primary) and
+// FMP (fallback — A15).
 //
 // A13: Before scoring, resolves CUSIPs to tickers via cusip.js for holdings
 // that lack tickers (Fidelity, Vanguard, Allspring, etc.). This enables
-// Finnhub lookups for ~45% of funds that were previously scoring 5.0 fallback.
+// fundamentals lookups for ~45% of funds that were previously scoring 5.0 fallback.
+//
+// A15: Added FMP (Financial Modeling Prep) as a fallback fundamentals provider.
+// When Finnhub returns no data for a ticker (403, empty metrics, or rate limit),
+// quality.js now tries FMP before counting the holding as a miss. This closes
+// two coverage gaps:
+//   Gap 1 — International equities: Finnhub free tier is US-only; FMP covers
+//           most large/mid-cap international equities.
+//   Gap 3 — Small/micro-cap stocks: Finnhub returns empty metrics for small-cap;
+//           FMP has broader small-cap coverage.
+//
+// FMP metrics are normalized to Finnhub-compatible field names so piotroskiLite()
+// works unchanged. FMP data is cached in Supabase (fmp_cache table, 7-day TTL)
+// alongside the existing finnhub_cache.
 //
 // Two scoring paths by holding type:
-//   Equity  → Piotroski-lite (5 binary checks on Finnhub fundamentals)
+//   Equity  → Piotroski-lite (5 binary checks on fundamentals)
 //   Bond    → issuerCat quality map (A2 finding: no letter-grade ratings in NPORT-P)
 //   Blended → weighted average by equity/bond portfolio share
 //
@@ -18,25 +32,24 @@
 // scoring.js (A6) consumes coverage_pct to decide weight adjustment:
 //   if coverage_pct < 0.40 → quality weight halved, redistributed to sector alignment
 //
-// Extensibility: Finnhub calls can be swapped for a richer fundamentals provider
-// (FMP, EODHD, etc.) without changing the return interface.
-//
 // ⚠️  No localStorage. No direct Supabase calls.
 // ⚠️  Finnhub has rate limits (~60/min free tier). Calls are sequential with 300ms delays.
-// ⚠️  Finnhub metrics are cached in Supabase (finnhub_cache table, 7-day TTL).
+// ⚠️  FMP has rate limits (~250/day free tier). Calls are sequential with 300ms delays.
+// ⚠️  Both providers' metrics are cached in Supabase (7-day TTL).
 //     First run populates the cache; subsequent runs serve from cache.
 //     Shared holdings across funds (e.g. AAPL in 5 funds) hit the API once.
 
 import { apiFetch } from '../services/api.js';
-import { getFinnhubCache, saveFinnhubCache } from '../services/cache.js';
+import { getFinnhubCache, saveFinnhubCache, getFmpCache, saveFmpCache } from '../services/cache.js';
 import { resolveCusipTickers } from './cusip.js';
 
 // ---------------------------------------------------------------------------
 // Configuration
 // ---------------------------------------------------------------------------
 
-const TOP_N_EQUITY      = 15;    // top equity holdings by weight for Finnhub lookup
+const TOP_N_EQUITY      = 15;    // top equity holdings by weight for fundamentals lookup
 const FINNHUB_DELAY_MS  = 300;   // delay between Finnhub API calls
+const FMP_DELAY_MS      = 300;   // delay between FMP API calls
 const FINNHUB_TIMEOUT   = 8000;  // per-call timeout (ms)
 
 // ---------------------------------------------------------------------------
@@ -137,9 +150,87 @@ async function fetchFinnhubMetrics(ticker) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// FMP fundamentals fetch — A15
+// ---------------------------------------------------------------------------
+
 /**
- * Piotroski-lite: 5 binary pass/fail checks on Finnhub metrics.
+ * Fetches financial metrics for a single equity ticker from FMP.
+ * Endpoint: /api/fmp/v3/key-metrics-ttm/{ticker}
+ *
+ * FMP returns an array — we take the first element and normalize field names
+ * to match Finnhub's naming so piotroskiLite() works unchanged.
+ *
+ * FMP key-metrics-ttm fields used:
+ *   roeTTM                   → roeTTM
+ *   netIncomePerShareTTM     → (sign check for profit margin proxy)
+ *   debtToEquityTTM          → totalDebtToEquityQuarterly
+ *   freeCashFlowPerShareTTM  → freeCashFlowTTM (per-share proxy, sign is what matters)
+ *   revenuePerShareTTM       → (not directly usable for growth — skipped)
+ *
+ * Also tries the ratios-ttm fields if key-metrics fields are absent:
+ *   returnOnEquityTTM        → roeTTM
+ *   netProfitMarginTTM       → netProfitMarginTTM
+ *   debtEquityRatioTTM       → totalDebtToEquityQuarterly
+ *
+ * Returns a Finnhub-compatible metrics object or null on failure.
+ */
+async function fetchFmpMetrics(ticker) {
+  try {
+    const data = await apiFetch(
+      `/api/fmp/v3/key-metrics-ttm/${encodeURIComponent(ticker)}`
+    );
+
+    // FMP returns an array — take first element
+    const raw = Array.isArray(data) ? data[0] : data;
+    if (!raw || typeof raw !== 'object') return null;
+
+    // Check for FMP error responses (e.g. { "Error Message": "..." })
+    if (raw['Error Message']) return null;
+
+    // Normalize to Finnhub-compatible field names for piotroskiLite()
+    const metrics = {
+      // ROE: prefer roeTTM, fall back to returnOnEquityTTM
+      roeTTM: raw.roeTTM ?? raw.returnOnEquityTTM ?? null,
+
+      // Profit margin: prefer netProfitMarginTTM (from ratios-style response),
+      // fall back to deriving sign from netIncomePerShareTTM
+      netProfitMarginTTM: raw.netProfitMarginTTM ?? (
+        raw.netIncomePerShareTTM != null
+          ? (raw.netIncomePerShareTTM > 0 ? 0.01 : -0.01)  // sign proxy
+          : null
+      ),
+
+      // Debt-to-equity: prefer debtToEquityTTM, fall back to debtEquityRatioTTM
+      totalDebtToEquityQuarterly: raw.debtToEquityTTM ?? raw.debtEquityRatioTTM ?? null,
+
+      // Revenue growth: not available in key-metrics-ttm or ratios-ttm
+      // piotroskiLite handles null gracefully (skips this check)
+      revenueGrowthTTMYoy: null,
+
+      // Free cash flow: per-share is fine — sign is what Piotroski checks
+      freeCashFlowTTM: raw.freeCashFlowPerShareTTM ?? raw.freeCashFlowTTM ?? null,
+    };
+
+    // Only return if we got at least one usable metric
+    const hasData = Object.values(metrics).some(v => v != null);
+    return hasData ? metrics : null;
+  } catch (err) {
+    console.warn(`[quality] FMP error for ${ticker}:`, err.message);
+    return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Piotroski-lite scoring
+// ---------------------------------------------------------------------------
+
+/**
+ * Piotroski-lite: 5 binary pass/fail checks on fundamentals metrics.
  * Returns { points, available } — score = points / available.
+ *
+ * Works with both Finnhub and FMP data (A15) because FMP metrics are
+ * normalized to the same field names.
  *
  * Checks (plan lines 173–178):
  *   +1 if ROE > 0
@@ -199,11 +290,12 @@ function piotroskiLite(metrics) {
 /**
  * Computes holdings quality score for a single fund.
  *
- * @param {Array}  holdings     - Holdings array from edgar.js (enriched by classify.js)
- * @param {Object} metricsCache - Shared cache map { TICKER: metricsObject }, mutated in place
+ * @param {Array}  holdings        - Holdings array from edgar.js (enriched by classify.js)
+ * @param {Object} metricsCache    - Shared Finnhub cache map { TICKER: metricsObject }, mutated in place
+ * @param {Object} fmpMetricsCache - Shared FMP cache map { TICKER: metricsObject }, mutated in place (A15)
  * @returns {Promise<Object>} - { score, coverage_pct, equity_ratio, bond_ratio, details }
  */
-async function scoreFundQuality(holdings, metricsCache) {
+async function scoreFundQuality(holdings, metricsCache, fmpMetricsCache) {
   const result = {
     score:        5.0,    // fallback
     coverage_pct: 0,
@@ -215,7 +307,8 @@ async function scoreFundQuality(holdings, metricsCache) {
       equityCount:    0,
       bondCount:      0,
       finnhubHits:    0,
-      finnhubMisses:  0,
+      fmpHits:        0,      // A15: holdings scored via FMP fallback
+      totalMisses:    0,      // A15: holdings with no data from either provider
     },
   };
 
@@ -262,16 +355,15 @@ async function scoreFundQuality(holdings, metricsCache) {
       const ticker = (h.holding_ticker || '').replace(/[^A-Z]/gi, '').toUpperCase();
 
       if (!ticker) {
-        result.details.finnhubMisses++;
+        result.details.totalMisses++;
         continue;
       }
 
-      // Cache-first: check shared metricsCache (populated from Supabase +
-      // previous funds' API calls in this run). Only call Finnhub on miss.
+      // ── Step 1: Try Finnhub (cache → API) ────────────────────────────
       let metrics = metricsCache[ticker] ?? null;
-      let fromCache = metrics != null;
+      let fromFinnhubCache = metrics != null;
 
-      if (!fromCache) {
+      if (!fromFinnhubCache) {
         metrics = await fetchFinnhubMetrics(ticker);
 
         if (metrics) {
@@ -279,7 +371,7 @@ async function scoreFundQuality(holdings, metricsCache) {
           // across funds in this run) and persist to Supabase (7-day TTL).
           metricsCache[ticker] = metrics;
           saveFinnhubCache(ticker, metrics).catch(err =>
-            console.warn(`[quality] cache save failed for ${ticker}:`, err.message)
+            console.warn(`[quality] Finnhub cache save failed for ${ticker}:`, err.message)
           );
         }
 
@@ -289,8 +381,35 @@ async function scoreFundQuality(holdings, metricsCache) {
         }
       }
 
+      // ── Step 2: If Finnhub missed, try FMP fallback (cache → API) ────
+      // A15: Closes gaps for international equities and small-cap stocks.
+      let usedFmp = false;
       if (!metrics) {
-        result.details.finnhubMisses++;
+        metrics = fmpMetricsCache[ticker] ?? null;
+        let fromFmpCache = metrics != null;
+
+        if (!fromFmpCache) {
+          metrics = await fetchFmpMetrics(ticker);
+
+          if (metrics) {
+            fmpMetricsCache[ticker] = metrics;
+            saveFmpCache(ticker, metrics).catch(err =>
+              console.warn(`[quality] FMP cache save failed for ${ticker}:`, err.message)
+            );
+          }
+
+          // Delay only after actual API calls
+          if (i < topEquities.length - 1) {
+            await sleep(FMP_DELAY_MS);
+          }
+        }
+
+        usedFmp = true;
+      }
+
+      // ── Step 3: Score the holding ────────────────────────────────────
+      if (!metrics) {
+        result.details.totalMisses++;
       } else {
         const { points, available } = piotroskiLite(metrics);
 
@@ -298,9 +417,14 @@ async function scoreFundQuality(holdings, metricsCache) {
           const holdingQuality = points / available; // 0 to 1
           weightedQualitySum += holdingQuality * (h.weight ?? 0);
           scoredWeight += (h.weight ?? 0);
-          result.details.finnhubHits++;
+
+          if (usedFmp) {
+            result.details.fmpHits++;
+          } else {
+            result.details.finnhubHits++;
+          }
         } else {
-          result.details.finnhubMisses++;
+          result.details.totalMisses++;
         }
       }
     }
@@ -348,7 +472,7 @@ async function scoreFundQuality(holdings, metricsCache) {
   // else: stays at 5.0 fallback
 
   // ── Coverage percentage (plan lines 183, 208–211) ───────────────────────
-  // Equity coverage: weight of holdings with Finnhub data / total equity weight
+  // Equity coverage: weight of holdings with data / total equity weight
   // Bond coverage: all bonds are scored (issuerCat always produces a value) = 100%
   const equityCoverage = equityWeight > 0 ? equityCoverageWeight / equityWeight : 0;
   const bondCoverage   = bondWeight > 0 ? 1.0 : 0; // bonds always have issuerCat score
@@ -385,7 +509,7 @@ export async function computeHoldingsQuality(holdingsMap, onProgress) {
 
   // ── A13: Pre-step — Resolve CUSIPs to tickers for holdings missing tickers ─
   // Must run BEFORE the equity ticker collection below so that newly-resolved
-  // tickers are included in the Finnhub cache pre-population and scoring.
+  // tickers are included in the cache pre-population and scoring.
   try {
     const cusipResult = await resolveCusipTickers(holdingsMap);
     console.log(`[quality] CUSIP resolution: ${cusipResult.resolved} tickers resolved ` +
@@ -395,11 +519,11 @@ export async function computeHoldingsQuality(holdingsMap, onProgress) {
     console.warn('[quality] CUSIP resolution failed, continuing with available tickers:', err.message);
   }
 
-  // ── Pre-populate Finnhub cache from Supabase ──────────────────────────────
+  // ── Pre-populate caches from Supabase ──────────────────────────────────
   // Collect all unique equity tickers across all funds' top-15 holdings,
-  // batch-fetch from Supabase (7-day TTL), then only call the Finnhub API
-  // for cache misses. Shared holdings across funds (AAPL, MSFT, etc.)
-  // only hit the API once per 7-day window.
+  // batch-fetch from Supabase (7-day TTL), then only call APIs for cache
+  // misses. Shared holdings across funds (AAPL, MSFT, etc.) only hit
+  // the API once per 7-day window.
   const allEquityTickers = new Set();
 
   for (const fundTicker of tickers) {
@@ -415,7 +539,7 @@ export async function computeHoldingsQuality(holdingsMap, onProgress) {
     }
   }
 
-  // Batch-fetch from Supabase cache (single query for all tickers)
+  // Batch-fetch Finnhub cache from Supabase (single query for all tickers)
   let metricsCache = {};
   if (allEquityTickers.size > 0) {
     try {
@@ -424,6 +548,22 @@ export async function computeHoldingsQuality(holdingsMap, onProgress) {
       console.log(`[quality] Finnhub cache: ${cacheHits}/${allEquityTickers.size} holdings cached, ${allEquityTickers.size - cacheHits} need API calls`);
     } catch (err) {
       console.warn('[quality] Finnhub cache fetch failed, all holdings will use API:', err.message);
+    }
+  }
+
+  // A15: Batch-fetch FMP cache from Supabase (same ticker set)
+  // FMP cache is populated by previous runs where Finnhub missed. Pre-fetching
+  // avoids redundant FMP API calls for tickers already resolved via FMP.
+  let fmpMetricsCache = {};
+  if (allEquityTickers.size > 0) {
+    try {
+      fmpMetricsCache = await getFmpCache([...allEquityTickers]);
+      const fmpCacheHits = Object.keys(fmpMetricsCache).length;
+      if (fmpCacheHits > 0) {
+        console.log(`[quality] FMP cache: ${fmpCacheHits} holdings pre-cached`);
+      }
+    } catch (err) {
+      console.warn('[quality] FMP cache fetch failed:', err.message);
     }
   }
 
@@ -443,15 +583,20 @@ export async function computeHoldingsQuality(holdingsMap, onProgress) {
         details: {
           equityScore: null, bondScore: null,
           equityCount: 0, bondCount: 0,
-          finnhubHits: 0, finnhubMisses: 0,
+          finnhubHits: 0, fmpHits: 0, totalMisses: 0,
         },
       };
     } else {
       console.log(`[quality] scoring ${ticker} — ${holdings.length} holdings`);
-      results[ticker] = await scoreFundQuality(holdings, metricsCache);
+      results[ticker] = await scoreFundQuality(holdings, metricsCache, fmpMetricsCache);
+
+      const d = results[ticker].details;
+      const totalScored = d.finnhubHits + d.fmpHits;
+      const totalAttempted = totalScored + d.totalMisses;
+
       console.log(`[quality] ${ticker} → score=${results[ticker].score.toFixed(2)}, ` +
         `coverage=${(results[ticker].coverage_pct * 100).toFixed(0)}%, ` +
-        `eq=${results[ticker].details.finnhubHits}/${results[ticker].details.finnhubHits + results[ticker].details.finnhubMisses} Finnhub hits`);
+        `hits=${totalScored}/${totalAttempted} (finnhub=${d.finnhubHits}, fmp=${d.fmpHits}, miss=${d.totalMisses})`);
     }
 
     completed++;
