@@ -8,7 +8,10 @@
 //   holdingsQuality  (30%)  — Piotroski-lite equity + issuerCat bonds (quality.js)
 //
 // Composite:
-//   composite = (sectorAlignment × W1) + (momentum × W2) + (holdingsQuality × W3)
+//   1. Compute raw sectorAlignment, momentum, holdingsQuality on 1–10 scale
+//   2. Standardize each factor to z-scores across the fund universe
+//      (equalizes effective weight regardless of raw score distribution spread)
+//   3. composite = CDF(z_SA × W1 + z_M × W2 + z_HQ × W3) mapped to 1–10
 //               − concentrationPenalty
 //               + expenseModifier
 //               + flowModifier
@@ -413,22 +416,11 @@ export function calcCompositeScores(
     const flowModifier     = computeFlowModifier(edgarMeta, ticker);
     const turnoverModifier = 0.0;   // deferred — turnover not in NPORT-P
 
-    // ── Composite formula ──────────────────────────────────────────────────
-    const weighted =
-      sectorAlignmentScore * W1 +
-      momentumScore        * W2 +
-      holdingsQualityScore * W3;
-
-    const composite = clamp(
-      weighted - concentrationPenalty + expenseModifier + flowModifier + turnoverModifier,
-      1.0,
-      10.0
-    );
-
+    // ── Store raw scores (composite deferred to standardization pass) ─────
     results.push({
       ...fund,
       ticker,
-      composite:            parseFloat(composite.toFixed(3)),
+      composite:            0,   // placeholder — computed after standardization
       sectorAlignment:      parseFloat(sectorAlignmentScore.toFixed(3)),
       momentum:             parseFloat(momentumScore.toFixed(3)),
       holdingsQuality:      parseFloat(holdingsQualityScore.toFixed(3)),
@@ -439,7 +431,72 @@ export function calcCompositeScores(
       sectorBreakdown,
       isMoneyMarket:        false,
       dataQuality,
+      _adjW1: W1,           // per-fund adjusted weight (accounts for quality halving)
+      _adjW2: W2,
+      _adjW3: W3,
     });
+  }
+
+  // ── STANDARDIZATION PASS ──────────────────────────────────────────────────
+  // Standardize each factor to z-scores across the fund universe so that the
+  // 40/30/30 weights reflect actual ranking influence, not variance luck.
+  // Without this, momentum (full 1–10 spread via CDF) dominates rankings
+  // despite only 30% nominal weight, while positioning (~3-point spread from
+  // holdings-weighted averages) contributes almost nothing to differentiation.
+  //
+  // Raw factor scores are preserved on the 1–10 scale for UI display.
+  // Z-scores are used only for composite weighting.
+
+  const scorable = results.filter(f => !f.isMoneyMarket);
+
+  function standardizeFactor(funds, key) {
+    const vals = funds.map(f => f[key]);
+    if (vals.length < 2) return;
+
+    const mean = vals.reduce((a, b) => a + b, 0) / vals.length;
+    const variance = vals.reduce((acc, v) => acc + (v - mean) ** 2, 0)
+                     / (vals.length - 1);   // Bessel-corrected
+    const stdev = Math.sqrt(variance);
+    if (stdev === 0) return;
+
+    for (const f of funds) {
+      f[`${key}_z`] = (f[key] - mean) / stdev;
+    }
+  }
+
+  standardizeFactor(scorable, 'sectorAlignment');
+  standardizeFactor(scorable, 'momentum');
+  standardizeFactor(scorable, 'holdingsQuality');
+
+  // ── COMPOSITE FROM Z-SCORES ───────────────────────────────────────────────
+  // Weighted z-composite → CDF mapping back to 1–10 scale.
+  // This ensures each factor contributes proportionally to its nominal weight
+  // regardless of its raw score distribution spread.
+
+  for (const f of results) {
+    if (f.isMoneyMarket) continue;
+
+    const zSA = f.sectorAlignment_z  ?? 0;
+    const zM  = f.momentum_z         ?? 0;
+    const zHQ = f.holdingsQuality_z  ?? 0;
+
+    const zComposite = zSA * f._adjW1 + zM * f._adjW2 + zHQ * f._adjW3;
+
+    // Map z-composite back to 1–10 via CDF (same S-curve as momentum uses)
+    const mappedScore = 1 + 9 * normalCDF(zComposite);
+
+    f.composite = parseFloat(clamp(
+      mappedScore - f.concentrationPenalty + f.expenseModifier + f.flowModifier + f.turnoverModifier,
+      1.0, 10.0
+    ).toFixed(3));
+
+    // Clean up internal-only fields
+    delete f.sectorAlignment_z;
+    delete f.momentum_z;
+    delete f.holdingsQuality_z;
+    delete f._adjW1;
+    delete f._adjW2;
+    delete f._adjW3;
   }
 
   // Sort by composite descending
