@@ -162,27 +162,19 @@ function buildLetterPrompt(scoredFunds, allocations, thesis, sectorScores, holdi
   lines.push('should feel this is a smart, well-reasoned set of choices.');
   lines.push('');
   lines.push('VOICE:');
-  lines.push('Write the way a smart friend explains things over coffee. Casual but');
-  lines.push('informed. You can use "I" and contractions. Short sentences are fine.');
-  lines.push('');
-  lines.push('ABSOLUTELY DO NOT USE THESE PHRASES OR ANYTHING LIKE THEM:');
-  lines.push('  - "positioned to benefit" / "well-positioned"');
-  lines.push('  - "current market conditions" / "current environment"');
-  lines.push('  - "strong recent performance" / "gaining ground consistently"');
-  lines.push('  - "making the right calls" / "adapting well"');
-  lines.push('  - "limited visibility into holdings"');
-  lines.push('  - "appears positioned" / "seems well-suited"');
-  lines.push('  - "weather uncertainty" / "navigate challenges"');
-  lines.push('  - "dominant economic forces at work"');
-  lines.push('  - "meaningful exposure" / "significant positions"');
-  lines.push('These are vague filler. Replace every one with a specific fact.');
+  lines.push('Main street, not Wall Street. Talk to the reader like they\'re a coworker');
+  lines.push('you respect. Matter-of-fact — no hype, no doom, just what\'s happening and');
+  lines.push('why these funds make sense because of it. You can use "I" and contractions.');
+  lines.push('Present the economic picture straight down the middle. Don\'t lead the');
+  lines.push('investor toward bull or bear — just give them the facts and connect the dots.');
+  lines.push('If two data points seem to conflict, think about why they coexist and');
+  lines.push('explain it — don\'t just flag it as strange.');
   lines.push('');
   lines.push('OTHER RULES:');
   lines.push('- No bullet points or numbered lists — flowing paragraphs only.');
   lines.push('- No financial jargon without immediately explaining it.');
   lines.push('- Every claim must reference a specific number, company, or condition.');
-  lines.push('- If you catch yourself writing something that could describe any fund in');
-  lines.push('  any market, delete it and write something specific instead.');
+  lines.push('- Be specific. If something could describe any fund in any market, cut it.');
   lines.push('');
   lines.push('Respond with ONLY the letter text. No JSON, no markdown fences, no preamble.');
 
@@ -228,7 +220,7 @@ export async function generateInvestorLetter(
       const response = await callClaude({
         model:      SONNET_MODEL,
         max_tokens: 2000,
-        system:     'You write like a sharp friend who follows markets closely and is explaining their thinking over coffee. You are direct, specific, and never hide behind vague language. When you recommend something, you say exactly why — naming specific companies, sectors, and numbers. You use contractions and short sentences when they fit. You never sound like a compliance department or a canned report.',
+        system:     'You explain investment choices the way a sharp coworker would — main street language, matter-of-fact, no hype or doom. You connect specific fund holdings to specific things happening in the economy. You present the picture straight down the middle and let the facts speak.',
         messages:   [{ role: 'user', content: prompt }],
       });
 
