@@ -587,8 +587,10 @@ async function parseNportXml(xmlUrl) {
         ? (tickerEl.getAttribute('value') || tickerEl.textContent || '').trim() || null
         : null;
 
-      // CUSIP (v5.1): value attribute is the standard, fallback to textContent
-      const cusip = identifiers ? xmlAttrOrText(identifiers, 'cusip') : null;
+      // CUSIP (v5.1): direct child of <invstOrSec>, NOT inside <identifiers>.
+      // NPORT-P schema: <cusip> is a sibling of <identifiers>, not a child.
+      // A13 fix: was incorrectly searching inside identifiers block.
+      const cusip = xmlText(sec, 'cusip');
 
       // ── New v5.1 fields ────────────────────────────────────────────────
       const issuerCat    = xmlText(sec, 'issuerCat');
