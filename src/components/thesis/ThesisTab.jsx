@@ -1,5 +1,5 @@
 // =============================================================================
-// FundLens v5 — src/components/thesis/ThesisTab.jsx
+// FundLens v5.1 — src/components/thesis/ThesisTab.jsx
 // Transparency layer into the scoring black box.
 // Sections: Dominant Theme Banner · Sector Scorecard · Market Analysis ·
 //           Risks + Catalysts · Fund Rankings
@@ -231,7 +231,7 @@ function SectorCard({ sector, data }) {
             marginLeft: '8px',
           }}
         >
-          {score.toFixed(0)}/10
+          {score.toFixed(1)}/10
         </span>
       </div>
 
@@ -313,8 +313,8 @@ function MarketAnalysis({ thesis, worldData }) {
   const narrative = thesis?.thesis ?? thesis?.narrative ?? '';
 
   // Derive source counts from worldData if available
-  const fredCount  = worldData?.fredSeries?.length ?? worldData?.fred?.length ?? null;
-  const gdeltCount = worldData?.gdeltHeadlines?.length ?? worldData?.gdelt?.length ?? null;
+  const fredCount  = worldData?.dataQuality?.fredSeriesCount ?? null;
+  const gdeltCount = worldData?.dataQuality?.headlineCount   ?? null;
 
   const hasSources = fredCount != null || gdeltCount != null;
 
