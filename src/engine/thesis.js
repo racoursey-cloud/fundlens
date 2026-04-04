@@ -169,21 +169,21 @@ function buildPrompt(worldData) {
 
   // ── Scoring instructions ──────────────────────────────────────────────────
   lines.push('=== SECTOR SCORING INSTRUCTIONS ===');
-  lines.push('Score each GICS sector from 1 to 10:');
-  lines.push('  10 = sector directly captures the dominant macro theme');
-  lines.push('  8–9 = strong tailwind from current conditions');
-  lines.push('  6–7 = moderate benefit');
-  lines.push('  4–5 = neutral / no clear catalyst');
-  lines.push('  2–3 = facing meaningful headwinds');
-  lines.push('  1   = severe headwinds, avoid');
+  lines.push('Score each GICS sector from 1.0 to 10.0 (one decimal place):');
+  lines.push('  9.0–10.0 = sector directly captures the dominant macro theme');
+  lines.push('  8.0–8.9  = strong tailwind from current conditions');
+  lines.push('  6.0–7.9  = moderate benefit');
+  lines.push('  4.0–5.9  = neutral / no clear catalyst');
+  lines.push('  2.0–3.9  = facing meaningful headwinds');
+  lines.push('  1.0–1.9  = severe headwinds, avoid');
   lines.push('');
   lines.push('RANGE ANCHORING (mandatory):');
-  lines.push('  Use the FULL 1–10 range. A score of 5 is truly neutral.');
-  lines.push('  At least 2 sectors MUST score 7 or higher.');
-  lines.push('  At least 2 sectors MUST score 4 or lower.');
-  lines.push('  If all sectors cluster between 4–7, your analysis lacks conviction.');
+  lines.push('  Use the FULL 1.0–10.0 range with one decimal place (e.g. 7.3, not 7).');
+  lines.push('  At least 2 sectors MUST score 7.0 or higher.');
+  lines.push('  At least 2 sectors MUST score 4.0 or lower.');
+  lines.push('  If all sectors cluster between 4.0–7.0, your analysis lacks conviction.');
   lines.push('  Differentiate clearly: the spread between your best and worst sector');
-  lines.push('  should be at least 4 points.');
+  lines.push('  should be at least 4.0 points.');
   lines.push('');
 
   // ── Sectors to score ──────────────────────────────────────────────────────
@@ -198,8 +198,8 @@ function buildPrompt(worldData) {
   lines.push(JSON.stringify({
     thesis:        '350-word investment thesis narrative here',
     sectorScores:  {
-      Technology: { score: 7, reason: 'one-sentence explanation' },
-      '...':      { score: 5, reason: '...' },
+      Technology: { score: 7.3, reason: 'one-sentence explanation' },
+      '...':      { score: 4.8, reason: '...' },
     },
     dominantTheme:  '2–4 word label e.g. "Rate Cut Anticipation"',
     macroStance:    'risk-on | risk-off | mixed',
@@ -229,12 +229,12 @@ function buildFallbackPrompt() {
     '',
     'You are a quantitative portfolio strategist.',
     'Based on your general knowledge of current macro conditions,',
-    'score each of the following GICS sectors from 1–10.',
+    'score each of the following GICS sectors from 1.0–10.0 (one decimal place).',
     '',
     'RANGE ANCHORING (mandatory):',
-    '  Use the full 1–10 range.',
-    '  At least 2 sectors must score 7 or higher.',
-    '  At least 2 sectors must score 4 or lower.',
+    '  Use the full 1.0–10.0 range with one decimal place (e.g. 7.3, not 7).',
+    '  At least 2 sectors must score 7.0 or higher.',
+    '  At least 2 sectors must score 4.0 or lower.',
     '',
     'Sectors to score:',
     ...sectorNames.map(s => `  - ${s}`),
@@ -244,7 +244,7 @@ function buildFallbackPrompt() {
     JSON.stringify({
       thesis:        'Minimal fallback: insufficient macro data for full analysis.',
       sectorScores:  Object.fromEntries(
-        sectorNames.map(s => [s, { score: 5, reason: 'placeholder' }])
+        sectorNames.map(s => [s, { score: 5.0, reason: 'placeholder' }])
       ),
       dominantTheme:  'Data Unavailable',
       macroStance:    'mixed',
