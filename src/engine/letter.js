@@ -132,46 +132,57 @@ function buildLetterPrompt(scoredFunds, allocations, thesis, sectorScores, holdi
 
   // ── Writing instructions ──────────────────────────────────────────────────
   lines.push('=== WRITING INSTRUCTIONS ===');
-  lines.push('Write a clear, approachable investor letter (400–600 words) for people');
-  lines.push('managing their own 401K. These are NOT finance professionals.');
+  lines.push('Write a 400–600 word letter for 401K participants. Not finance professionals.');
   lines.push('');
-  lines.push('The letter must follow this exact structure:');
+  lines.push('STRUCTURE:');
   lines.push('');
   lines.push('PARAGRAPH 1 — INTRODUCTION:');
-  lines.push('Open by naming the recommended funds (the ones marked [RECOMMENDED] above)');
-  lines.push('with their allocation percentages. Briefly state what the current economic');
-  lines.push('environment looks like and why these particular funds make sense right now.');
-  lines.push('Make the reader feel oriented — they should immediately know what you are');
-  lines.push('recommending and roughly why.');
+  lines.push('Name the recommended funds with percentages. Set the scene: what is happening');
+  lines.push('in the economy RIGHT NOW that makes these the right picks? Use the specific');
+  lines.push('numbers from the thesis (oil price, gold price, consumer confidence, rates).');
+  lines.push('Don\'t just say "challenging environment" — say what\'s actually happening.');
   lines.push('');
   lines.push('PARAGRAPHS 2–N — ONE PARAGRAPH PER RECOMMENDED FUND:');
-  lines.push('For each recommended fund, write 2–3 sentences explaining why THIS specific');
-  lines.push('fund is on the list. Be concrete:');
-  lines.push('  - Reference what the fund actually holds (use the Top Holdings data above).');
-  lines.push('    For example: "This fund has significant positions in [companies/sectors],');
-  lines.push('    which are benefiting from [specific trend or condition]."');
-  lines.push('  - Explain how the fund\'s composition connects to the current economic');
-  lines.push('    environment described in the thesis.');
-  lines.push('  - If the fund has strong momentum, say what that means in plain terms');
-  lines.push('    (e.g., "it has been gaining ground steadily over recent months").');
-  lines.push('  - Do NOT just say "it scored well on positioning" — explain WHAT about its');
-  lines.push('    positioning makes it a good choice right now.');
+  lines.push('For each fund, make a SPECIFIC argument for why it belongs in the portfolio');
+  lines.push('right now. The argument must connect what the fund holds to what is happening');
+  lines.push('in the world:');
+  lines.push('  - Name actual companies or describe specific sector concentrations from the');
+  lines.push('    Top Holdings data. Use actual weight percentages when they are notable.');
+  lines.push('  - Make a direct causal link: "[Company/sector] benefits because [specific');
+  lines.push('    current condition]." Example: "Its 8% position in Exxon and Chevron');
+  lines.push('    means it profits directly from $105 oil."');
+  lines.push('  - If a fund has no Top Holdings data, focus on its performance trend and');
+  lines.push('    tier — do NOT apologize for missing data or say "limited visibility."');
+  lines.push('  - Each fund paragraph should make the reader think "oh, that makes sense"');
+  lines.push('    — not "that could describe any fund."');
   lines.push('');
   lines.push('FINAL PARAGRAPH — SUMMARY:');
-  lines.push('Wrap up by explaining how these funds work together as a group. Why does');
-  lines.push('this combination make sense? What balance or diversification does it provide?');
-  lines.push('End with a confident, reassuring note — the reader should feel comfortable');
-  lines.push('with the recommendation.');
+  lines.push('Explain what this combination gives the investor as a whole. What risks are');
+  lines.push('covered? What opportunities are captured? End with confidence — the reader');
+  lines.push('should feel this is a smart, well-reasoned set of choices.');
   lines.push('');
-  lines.push('TONE AND STYLE:');
-  lines.push('- Write like a helpful coworker who happens to follow the markets closely.');
-  lines.push('- No financial jargon. If you must use a term like "momentum" or "sector');
-  lines.push('  exposure," briefly explain what it means in context.');
-  lines.push('- No bullet points or numbered lists — write in flowing paragraphs.');
-  lines.push('- Fund tickers and percentages can appear inline in the prose.');
-  lines.push('- Be specific and concrete, never vague or generic.');
-  lines.push('- The reader should finish the letter understanding WHY each fund was chosen,');
-  lines.push('  not just THAT it was chosen.');
+  lines.push('VOICE:');
+  lines.push('Write the way a smart friend explains things over coffee. Casual but');
+  lines.push('informed. You can use "I" and contractions. Short sentences are fine.');
+  lines.push('');
+  lines.push('ABSOLUTELY DO NOT USE THESE PHRASES OR ANYTHING LIKE THEM:');
+  lines.push('  - "positioned to benefit" / "well-positioned"');
+  lines.push('  - "current market conditions" / "current environment"');
+  lines.push('  - "strong recent performance" / "gaining ground consistently"');
+  lines.push('  - "making the right calls" / "adapting well"');
+  lines.push('  - "limited visibility into holdings"');
+  lines.push('  - "appears positioned" / "seems well-suited"');
+  lines.push('  - "weather uncertainty" / "navigate challenges"');
+  lines.push('  - "dominant economic forces at work"');
+  lines.push('  - "meaningful exposure" / "significant positions"');
+  lines.push('These are vague filler. Replace every one with a specific fact.');
+  lines.push('');
+  lines.push('OTHER RULES:');
+  lines.push('- No bullet points or numbered lists — flowing paragraphs only.');
+  lines.push('- No financial jargon without immediately explaining it.');
+  lines.push('- Every claim must reference a specific number, company, or condition.');
+  lines.push('- If you catch yourself writing something that could describe any fund in');
+  lines.push('  any market, delete it and write something specific instead.');
   lines.push('');
   lines.push('Respond with ONLY the letter text. No JSON, no markdown fences, no preamble.');
 
@@ -217,7 +228,7 @@ export async function generateInvestorLetter(
       const response = await callClaude({
         model:      SONNET_MODEL,
         max_tokens: 2000,
-        system:     'You are a clear, down-to-earth writer who explains investment choices in plain language. You write for everyday people who want to understand what to do with their 401K and, more importantly, why. You never use jargon. You are specific and concrete — you reference actual fund holdings and real economic conditions, not abstract scores or vague generalities.',
+        system:     'You write like a sharp friend who follows markets closely and is explaining their thinking over coffee. You are direct, specific, and never hide behind vague language. When you recommend something, you say exactly why — naming specific companies, sectors, and numbers. You use contractions and short sentences when they fit. You never sound like a compliance department or a canned report.',
         messages:   [{ role: 'user', content: prompt }],
       });
 
