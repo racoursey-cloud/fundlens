@@ -283,6 +283,30 @@ function piotroskiLite(metrics) {
   return { points, available };
 }
 
+/**
+ * Checks whether a metrics object has at least one field that piotroskiLite
+ * can actually use. Finnhub sometimes returns a valid response with an empty
+ * metric object (e.g. for international or small-cap stocks). That empty
+ * object gets cached as non-null, which would prevent the FMP fallback from
+ * firing. This function catches that case.
+ */
+function hasUsableMetrics(metrics) {
+  if (!metrics || typeof metrics !== 'object') return false;
+  // Check every field that piotroskiLite reads
+  return (
+    metrics.roeTTM != null ||
+    metrics.roeRfy != null ||
+    metrics.netProfitMarginTTM != null ||
+    metrics.netProfitMarginAnnual != null ||
+    metrics.totalDebtToEquityQuarterly != null ||
+    metrics.totalDebtToEquityAnnual != null ||
+    metrics.revenueGrowthTTMYoy != null ||
+    metrics.revenueGrowth3Y != null ||
+    metrics.freeCashFlowTTM != null ||
+    metrics.freeCashFlowPerShareTTM != null
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Per-fund quality scoring
 // ---------------------------------------------------------------------------
@@ -381,10 +405,14 @@ async function scoreFundQuality(holdings, metricsCache, fmpMetricsCache) {
         }
       }
 
-      // ── Step 2: If Finnhub missed, try FMP fallback (cache → API) ────
+      // ── Step 2: If Finnhub missed or returned empty metrics, try FMP ──
       // A15: Closes gaps for international equities and small-cap stocks.
+      // Finnhub often returns a valid response with an empty metric object
+      // for non-US or small-cap tickers. hasUsableMetrics() catches this so
+      // the FMP fallback actually fires instead of silently scoring 0.
       let usedFmp = false;
-      if (!metrics) {
+      if (!metrics || !hasUsableMetrics(metrics)) {
+        metrics = null; // reset so FMP result replaces the empty Finnhub object
         metrics = fmpMetricsCache[ticker] ?? null;
         let fromFmpCache = metrics != null;
 
