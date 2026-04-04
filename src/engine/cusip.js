@@ -7,8 +7,9 @@
 // objects in place so all downstream code (quality.js, classify.js) benefits
 // automatically with zero interface changes.
 //
-// OpenFIGI free tier: 10 requests/minute, 100 CUSIPs per request.
-// Sequential batch processing with 6.5s delays between batches.
+// OpenFIGI free tier (no API key): 5 requests/minute, 10 CUSIPs per request.
+// Sequential batch processing with 13s delays between batches.
+// Scoped to top 30 holdings per fund by weight (quality.js only scores top 15).
 //
 // ⚠️  No localStorage. No direct Supabase calls.
 // ⚠️  Sequential API calls with 6.5s delays between batches. Never Promise.all().
@@ -22,10 +23,11 @@ import { getCusipCache, saveCusipCache } from '../services/cache.js';
 // Configuration
 // ---------------------------------------------------------------------------
 
-const BATCH_SIZE       = 100;   // OpenFIGI max items per request
-const BATCH_DELAY_MS   = 6500;  // 6.5s between batches (safe under 10 req/min)
+const BATCH_SIZE       = 10;    // OpenFIGI free tier (no API key): max 10 per request
+const BATCH_DELAY_MS   = 13000; // 13s between batches (safe under 5 req/min no-key limit)
 const RETRY_DELAY_MS   = 30000; // 30s wait on 429 before retry
 const MAX_RETRIES      = 1;     // 1 retry max per batch
+const TOP_N_PER_FUND   = 30;    // Only resolve top holdings by weight per fund
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -48,7 +50,13 @@ function buildCusipIndex(holdingsMap) {
   for (const fundTicker of Object.keys(holdingsMap)) {
     const holdings = holdingsMap[fundTicker]?.holdings ?? [];
 
-    for (const h of holdings) {
+    // Only resolve top holdings by weight — quality.js scores top 15 equities,
+    // so top 30 gives headroom after filtering out bonds/unknowns.
+    const topHoldings = [...holdings]
+      .sort((a, b) => (b.weight ?? 0) - (a.weight ?? 0))
+      .slice(0, TOP_N_PER_FUND);
+
+    for (const h of topHoldings) {
       const cusip = (h.cusip || '').trim();
       if (!cusip) continue;                    // no CUSIP available
       if (h.holding_ticker) continue;          // already has a ticker
