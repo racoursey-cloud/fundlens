@@ -274,7 +274,7 @@ async function fetchNportAccNoForSeries(cik, seriesId) {
     for (let i = 0; i < maxCheck; i++) {
       const accNo = nportAccNos[i];
       const accNoDashes = stripDashes(accNo);
-      const indexUrl = `/api/edgar/Archives/edgar/data/${bareCIK(cik)}/${accNoDashes}/${accNo}-index.htm`;
+      const indexUrl = `/api/www4sec/Archives/edgar/data/${bareCIK(cik)}/${accNoDashes}/${accNo}-index.htm`;
 
       try {
         const indexRes = await fetch(indexUrl);
