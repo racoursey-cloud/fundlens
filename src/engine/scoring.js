@@ -2,10 +2,20 @@
 // FundLens v5.1 — src/engine/scoring.js
 // Composite score calculator — 3-factor model + modifiers.
 //
-// Factors:
-//   sectorAlignment  (40%)  — fund sector weights × thesis sector scores
-//   momentum         (30%)  — cross-sectional Z-score + normal CDF (MSCI)
-//   holdingsQuality  (30%)  — Piotroski-lite equity + issuerCat bonds (quality.js)
+// Factors (default weights — information-ratio justified):
+//   sectorAlignment  (25%)  — fund sector weights × thesis sector scores
+//   momentum         (40%)  — cross-sectional Z-score + normal CDF (MSCI)
+//   holdingsQuality  (35%)  — Piotroski-lite equity + issuerCat bonds (quality.js)
+//
+// Weight rationale (Jegadeesh & Titman 1993, Novy-Marx 2013, Sharpe 1975):
+//   Momentum — highest, most persistent empirical premium (~8-10% annually)
+//   Quality  — fundamental data, meaningful premium (~3-5% annually)
+//   Positioning — tactical sector view, lowest documented reliability (0-2%)
+//
+// Quality confidence scaling (Grinold 1989 Fundamental Law):
+//   When Finnhub coverage < 40%, quality weight scales linearly by coverage
+//   (floor at 10% of base weight). Freed weight → momentum (always data-complete).
+//   At ≥40% coverage, full quality weight applies.
 //
 // Composite:
 //   1. Compute raw sectorAlignment, momentum, holdingsQuality on 1–10 scale
@@ -27,6 +37,7 @@ import {
   EXPENSE_THRESHOLDS,
   FLOW_MODIFIER,
   CONCENTRATION,
+  QUALITY_CONFIDENCE,
 } from './constants.js';
 
 // ---------------------------------------------------------------------------
@@ -346,6 +357,7 @@ export function calcCompositeScores(
           momentumFallback:         false,
           holdingsQualityFallback:  false,
           qualityWeightHalved:      false,
+          qualityConfidence:        1.0,
           fallbackCount:            0,
         },
       });
@@ -370,24 +382,31 @@ export function calcCompositeScores(
     const holdingsQualityFallback = qualityRaw == null;
     const holdingsQualityScore = holdingsQualityFallback ? 5.0 : Number(qualityRaw);
 
-    // Coverage-based weight adjustment:
-    // If coverage_pct < 0.40, halve quality weight, add freed weight to sector alignment
+    // Coverage-based quality weight scaling (confidence-weighted estimation):
+    // Scale quality weight proportionally to Finnhub coverage (Grinold 1989).
+    // At ≥ fullConfidenceAt coverage, full weight. Below that, scale linearly
+    // with a floor at minConfidence × base weight. Freed weight → momentum
+    // (always data-complete via Tiingo).
     const coveragePct = qualityData?.coverage_pct ?? 0;
-    const qualityWeightHalved = !holdingsQualityFallback && coveragePct < 0.40;
+    const qualityScaled = !holdingsQualityFallback && coveragePct < QUALITY_CONFIDENCE.fullConfidenceAt;
 
-    // ── Normalize weights (per-fund, accounts for quality weight halving) ──
-    const rawW1 = Number(weights?.sectorAlignment)  || 40;
-    const rawW2 = Number(weights?.momentum)          || 30;
-    const rawW3 = Number(weights?.holdingsQuality)   || 30;
+    // ── Normalize weights (per-fund, accounts for quality confidence scaling) ─
+    const rawW1 = Number(weights?.sectorAlignment)  || 25;
+    const rawW2 = Number(weights?.momentum)          || 40;
+    const rawW3 = Number(weights?.holdingsQuality)   || 35;
 
     let adjW1 = rawW1;
     let adjW2 = rawW2;
     let adjW3 = rawW3;
 
-    if (qualityWeightHalved) {
-      const freed = adjW3 / 2;
-      adjW3 = adjW3 - freed;
-      adjW1 = adjW1 + freed;        // freed weight goes to sector alignment
+    if (qualityScaled) {
+      const confidence = Math.max(
+        coveragePct / QUALITY_CONFIDENCE.fullConfidenceAt,
+        QUALITY_CONFIDENCE.minConfidence,
+      );
+      const freed = adjW3 * (1 - confidence);
+      adjW3 = adjW3 * confidence;
+      adjW2 = adjW2 + freed;            // freed weight → momentum
     }
 
     const wSum = adjW1 + adjW2 + adjW3 || 1;
@@ -403,7 +422,10 @@ export function calcCompositeScores(
       sectorAlignmentFallback,
       momentumFallback,
       holdingsQualityFallback,
-      qualityWeightHalved,
+      qualityWeightHalved: qualityScaled,    // legacy name, kept for UI compat
+      qualityConfidence: qualityScaled
+        ? Math.max(coveragePct / QUALITY_CONFIDENCE.fullConfidenceAt, QUALITY_CONFIDENCE.minConfidence)
+        : 1.0,
       fallbackCount,
     };
 
@@ -431,7 +453,7 @@ export function calcCompositeScores(
       sectorBreakdown,
       isMoneyMarket:        false,
       dataQuality,
-      _adjW1: W1,           // per-fund adjusted weight (accounts for quality halving)
+      _adjW1: W1,           // per-fund adjusted weight (accounts for quality confidence scaling)
       _adjW2: W2,
       _adjW3: W3,
     });
@@ -439,7 +461,7 @@ export function calcCompositeScores(
 
   // ── STANDARDIZATION PASS ──────────────────────────────────────────────────
   // Standardize each factor to z-scores across the fund universe so that the
-  // 40/30/30 weights reflect actual ranking influence, not variance luck.
+  // 25/40/35 weights reflect actual ranking influence, not variance luck.
   // Without this, momentum (full 1–10 spread via CDF) dominates rankings
   // despite only 30% nominal weight, while positioning (~3-point spread from
   // holdings-weighted averages) contributes almost nothing to differentiation.
