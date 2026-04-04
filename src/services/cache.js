@@ -5,7 +5,6 @@
 //
 // TTL summary:
 //   holdings_cache    → 15 days  (checked on first row cached_at)
-//   manager_scores    → 30 days  (per-row cached_at filter)
 //   fund_profiles     → 90 days  (per-row fetched_at filter)
 //   tiingo_cache      → 1 day    (per-row cached_at filter)
 //   sector_mappings   → permanent (no TTL)
@@ -256,49 +255,6 @@ export async function saveSectorMappingsBatch(mappingsArray) {
 }
 
 // ---------------------------------------------------------------------------
-// Manager Scores (30-day TTL)
-// ---------------------------------------------------------------------------
-
-/**
- * Returns a map of { TICKER: { score, reasoning, cached_at } } for the
- * given tickers. Rows older than 30 days are excluded.
- */
-export async function getManagerScores(tickers) {
-  if (!tickers || tickers.length === 0) return {};
-
-  const rows = await supaFetch(
-    `manager_scores?ticker=in.(${inList(tickers)})`
-  );
-  if (!Array.isArray(rows) || rows.length === 0) return {};
-
-  const result = {};
-  for (const row of rows) {
-    if (isStale(row.cached_at, 30)) continue;
-    result[row.ticker.toUpperCase()] = {
-      score:      row.score,
-      reasoning:  row.reasoning,
-      cached_at:  row.cached_at,
-    };
-  }
-  return result;
-}
-
-/**
- * Upserts an array of { ticker, score, reasoning, cached_at }.
- */
-export async function saveManagerScores(scoresArray) {
-  if (!scoresArray || scoresArray.length === 0) return;
-
-  return supaFetch('manager_scores?on_conflict=ticker', {
-    method: 'POST',
-    body: JSON.stringify(scoresArray),
-    headers: {
-      'Prefer': 'resolution=merge-duplicates,return=representation',
-    },
-  });
-}
-
-// ---------------------------------------------------------------------------
 // Fund Profiles / Expense Ratios (90-day TTL)
 // ---------------------------------------------------------------------------
 
@@ -475,7 +431,7 @@ export async function getUserWeights(userId) {
 
 /**
  * Upserts factor weights for the user.
- * weights: { mandate, momentum, risk_adj, manager_quality, risk_tolerance, ... }
+ * weights: { sectorAlignment, momentum, holdingsQuality, risk_tolerance }
  */
 export async function saveUserWeights(userId, weights) {
   // Map camelCase store keys → snake_case DB columns.
