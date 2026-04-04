@@ -8,6 +8,7 @@
 //   fund_profiles       → 90 days  (per-row fetched_at filter)
 //   tiingo_cache        → 1 day    (per-row cached_at filter)
 //   finnhub_cache       → 7 days   (per-row cached_at filter)
+//   fmp_cache           → 7 days   (per-row cached_at filter) — A15
 //   cusip_ticker_cache  → 90 days  (per-row cached_at filter) — A13
 //   sector_mappings     → permanent (no TTL)
 //   source_registry     → no TTL   (admin-managed)
@@ -25,6 +26,11 @@
 //   - Added getCusipCache() and saveCusipCache() for CUSIP→ticker cache
 //     (cusip_ticker_cache table, 90-day TTL). Used by cusip.js to resolve
 //     CUSIPs to equity tickers via OpenFIGI before quality scoring.
+//
+// A15 changes:
+//   - Added getFmpCache() and saveFmpCache() for FMP fundamentals cache
+//     (fmp_cache table, 7-day TTL). Used by quality.js as a fallback when
+//     Finnhub returns no data for international/small-cap equities.
 
 import { supaFetch } from './api.js';
 import { DEFAULT_WEIGHTS } from '../engine/constants.js';
@@ -407,6 +413,58 @@ export async function getFinnhubCache(tickers) {
  */
 export async function saveFinnhubCache(ticker, metrics) {
   return supaFetch('finnhub_cache?on_conflict=ticker', {
+    method: 'POST',
+    body: JSON.stringify({
+      ticker:    ticker.toUpperCase(),
+      metrics:   metrics,
+      cached_at: new Date().toISOString(),
+    }),
+    headers: {
+      'Prefer': 'resolution=merge-duplicates,return=representation',
+    },
+  });
+}
+
+// ---------------------------------------------------------------------------
+// FMP Metrics Cache (7-day TTL) — A15
+// ---------------------------------------------------------------------------
+
+/**
+ * Returns a map of { TICKER: metricsObject } for the given tickers.
+ * Rows older than 7 days are excluded. Same TTL as Finnhub — fundamentals
+ * change quarterly at most.
+ *
+ * Metrics are stored pre-normalized to Finnhub-compatible field names
+ * (roeTTM, netProfitMarginTTM, etc.) so piotroskiLite() works unchanged.
+ *
+ * @param {Array} tickers — ['NESN', '7203', 'RTRIX', ...]
+ * @returns {Object} — { NESN: { roeTTM, netProfitMarginTTM, ... }, ... }
+ */
+export async function getFmpCache(tickers) {
+  if (!tickers || tickers.length === 0) return {};
+
+  const rows = await supaFetch(
+    `fmp_cache?ticker=in.(${inList(tickers)})`
+  );
+  if (!Array.isArray(rows) || rows.length === 0) return {};
+
+  const result = {};
+  for (const row of rows) {
+    if (isStale(row.cached_at, 7)) continue;
+    result[row.ticker.toUpperCase()] = row.metrics ?? null;
+  }
+  return result;
+}
+
+/**
+ * Upserts a single ticker's FMP metrics into the cache.
+ * Metrics should be pre-normalized to Finnhub-compatible field names.
+ *
+ * @param {string} ticker — e.g. 'NESN'
+ * @param {Object} metrics — normalized metric object (Finnhub-compatible keys)
+ */
+export async function saveFmpCache(ticker, metrics) {
+  return supaFetch('fmp_cache?on_conflict=ticker', {
     method: 'POST',
     body: JSON.stringify({
       ticker:    ticker.toUpperCase(),
