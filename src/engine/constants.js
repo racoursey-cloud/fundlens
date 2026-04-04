@@ -91,22 +91,6 @@ export const FACTOR_LABELS = {
 export const FACTOR_KEYS = ['sectorAlignment', 'momentum', 'holdingsQuality'];
 
 // ---------------------------------------------------------------------------
-// Credit Rating Map — bond holding quality scoring
-// Maps rating strings to 0–1 quality scores
-// ---------------------------------------------------------------------------
-
-export const CREDIT_RATING_MAP = {
-  'AAA': 1.0,
-  'AA':  1.0,
-  'A':   0.8,
-  'BBB': 0.6,
-  'BB':  0.4,
-  'B':   0.3,
-  'CCC': 0.15,
-  'Unrated': 0.5,
-};
-
-// ---------------------------------------------------------------------------
 // Expense Modifier Thresholds (±0.5)
 // ---------------------------------------------------------------------------
 
@@ -125,18 +109,6 @@ export const EXPENSE_THRESHOLDS = {
 export const FLOW_MODIFIER = {
   inflow:  0.2,
   outflow: -0.2,
-};
-
-// ---------------------------------------------------------------------------
-// Turnover Modifier (−0.2 max)
-// High turnover = higher hidden costs and tax drag. No bonus for low turnover.
-// ---------------------------------------------------------------------------
-
-export const TURNOVER_THRESHOLDS = {
-  highCutoff:    1.5,   // turnover ratio > 150% → max penalty
-  mediumCutoff:  1.0,   // turnover ratio > 100% → partial penalty
-  highPenalty:  -0.2,
-  mediumPenalty: -0.1,
 };
 
 // ---------------------------------------------------------------------------
