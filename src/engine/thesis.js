@@ -267,6 +267,7 @@ async function callWithRetry(prompt) {
       const response = await callClaude({
         model:      SONNET_MODEL,
         max_tokens: 3000,
+        temperature: 0,
         system:     'You are a quantitative portfolio strategist. You write with conviction and precision. Your analysis is data-driven and actionable.',
         messages:   [{ role: 'user', content: prompt }],
       });
@@ -363,6 +364,7 @@ export async function generateThesis(worldData = {}) {
     const response = await callClaude({
       model:      SONNET_MODEL,
       max_tokens: 3000,
+      temperature: 0,
       system:     'You are a quantitative portfolio strategist.',
       messages:   [{ role: 'user', content: fallbackPrompt }],
     });
