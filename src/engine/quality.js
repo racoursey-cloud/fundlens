@@ -19,8 +19,12 @@
 //
 // ⚠️  No localStorage. No direct Supabase calls.
 // ⚠️  Finnhub has rate limits (~60/min free tier). Calls are sequential with 300ms delays.
+// ⚠️  Finnhub metrics are cached in Supabase (finnhub_cache table, 7-day TTL).
+//     First run populates the cache; subsequent runs serve from cache.
+//     Shared holdings across funds (e.g. AAPL in 5 funds) hit the API once.
 
 import { apiFetch } from '../services/api.js';
+import { getFinnhubCache, saveFinnhubCache } from '../services/cache.js';
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -185,10 +189,11 @@ function piotroskiLite(metrics) {
 /**
  * Computes holdings quality score for a single fund.
  *
- * @param {Array} holdings - Holdings array from edgar.js (enriched by classify.js)
+ * @param {Array}  holdings     - Holdings array from edgar.js (enriched by classify.js)
+ * @param {Object} metricsCache - Shared cache map { TICKER: metricsObject }, mutated in place
  * @returns {Promise<Object>} - { score, coverage_pct, equity_ratio, bond_ratio, details }
  */
-async function scoreFundQuality(holdings) {
+async function scoreFundQuality(holdings, metricsCache) {
   const result = {
     score:        5.0,    // fallback
     coverage_pct: 0,
@@ -251,7 +256,28 @@ async function scoreFundQuality(holdings) {
         continue;
       }
 
-      const metrics = await fetchFinnhubMetrics(ticker);
+      // Cache-first: check shared metricsCache (populated from Supabase +
+      // previous funds' API calls in this run). Only call Finnhub on miss.
+      let metrics = metricsCache[ticker] ?? null;
+      let fromCache = metrics != null;
+
+      if (!fromCache) {
+        metrics = await fetchFinnhubMetrics(ticker);
+
+        if (metrics) {
+          // Save to local map (avoids repeat API calls for shared holdings
+          // across funds in this run) and persist to Supabase (7-day TTL).
+          metricsCache[ticker] = metrics;
+          saveFinnhubCache(ticker, metrics).catch(err =>
+            console.warn(`[quality] cache save failed for ${ticker}:`, err.message)
+          );
+        }
+
+        // Delay only after actual API calls, not cache hits
+        if (i < topEquities.length - 1) {
+          await sleep(FINNHUB_DELAY_MS);
+        }
+      }
 
       if (!metrics) {
         result.details.finnhubMisses++;
@@ -266,11 +292,6 @@ async function scoreFundQuality(holdings) {
         } else {
           result.details.finnhubMisses++;
         }
-      }
-
-      // Delay between Finnhub calls to respect rate limits
-      if (i < topEquities.length - 1) {
-        await sleep(FINNHUB_DELAY_MS);
       }
     }
 
@@ -351,6 +372,40 @@ export async function computeHoldingsQuality(holdingsMap, onProgress) {
   if (!holdingsMap || typeof holdingsMap !== 'object') return results;
 
   const tickers = Object.keys(holdingsMap);
+
+  // ── Pre-populate Finnhub cache from Supabase ──────────────────────────────
+  // Collect all unique equity tickers across all funds' top-15 holdings,
+  // batch-fetch from Supabase (7-day TTL), then only call the Finnhub API
+  // for cache misses. Shared holdings across funds (AAPL, MSFT, etc.)
+  // only hit the API once per 7-day window.
+  const allEquityTickers = new Set();
+
+  for (const fundTicker of tickers) {
+    const holdings = holdingsMap[fundTicker]?.holdings ?? [];
+    const equities = holdings
+      .filter(h => isEquityHolding(h))
+      .sort((a, b) => (b.weight ?? 0) - (a.weight ?? 0))
+      .slice(0, TOP_N_EQUITY);
+
+    for (const h of equities) {
+      const t = (h.holding_ticker || '').replace(/[^A-Z]/gi, '').toUpperCase();
+      if (t) allEquityTickers.add(t);
+    }
+  }
+
+  // Batch-fetch from Supabase cache (single query for all tickers)
+  let metricsCache = {};
+  if (allEquityTickers.size > 0) {
+    try {
+      metricsCache = await getFinnhubCache([...allEquityTickers]);
+      const cacheHits = Object.keys(metricsCache).length;
+      console.log(`[quality] Finnhub cache: ${cacheHits}/${allEquityTickers.size} holdings cached, ${allEquityTickers.size - cacheHits} need API calls`);
+    } catch (err) {
+      console.warn('[quality] Finnhub cache fetch failed, all holdings will use API:', err.message);
+    }
+  }
+
+  // ── Score each fund ────────────────────────────────────────────────────────
   let completed = 0;
 
   for (const ticker of tickers) {
@@ -371,7 +426,7 @@ export async function computeHoldingsQuality(holdingsMap, onProgress) {
       };
     } else {
       console.log(`[quality] scoring ${ticker} — ${holdings.length} holdings`);
-      results[ticker] = await scoreFundQuality(holdings);
+      results[ticker] = await scoreFundQuality(holdings, metricsCache);
       console.log(`[quality] ${ticker} → score=${results[ticker].score.toFixed(2)}, ` +
         `coverage=${(results[ticker].coverage_pct * 100).toFixed(0)}%, ` +
         `eq=${results[ticker].details.finnhubHits}/${results[ticker].details.finnhubHits + results[ticker].details.finnhubMisses} Finnhub hits`);
