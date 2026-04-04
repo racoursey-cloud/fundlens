@@ -39,28 +39,22 @@ const RISK_DESCRIPTIONS = {
 
 const FACTOR_META = [
   {
-    key: 'mandate',
-    label: 'Macro Fit',
-    description: "How well does the fund's strategy match what's happening now?",
-    defaultVal: 40,
-  },
-  {
-    key: 'momentum',
-    label: 'Market Feel',
-    description: 'Is this fund already moving in the right direction?',
+    key: 'sectorAlignment',
+    label: 'Positioning',
+    description: "How well does the fund's sector exposure align with the current macro thesis?",
     defaultVal: 25,
   },
   {
-    key: 'riskAdj',
-    label: 'Room to Run',
-    description: 'Does this fund deliver returns without wild swings?',
-    defaultVal: 20,
+    key: 'momentum',
+    label: 'Momentum',
+    description: "Is this fund's recent price performance strong relative to peers?",
+    defaultVal: 40,
   },
   {
-    key: 'managerQuality',
-    label: 'Foundations',
-    description: 'How consistently has the management team executed?',
-    defaultVal: 15,
+    key: 'holdingsQuality',
+    label: 'Quality',
+    description: 'How fundamentally sound are the underlying holdings?',
+    defaultVal: 35,
   },
 ];
 
@@ -70,7 +64,7 @@ const FACTOR_META = [
 
 function normalizeWeights(weights) {
   const total = Object.values(weights).reduce((s, v) => s + v, 0);
-  if (total === 0) return { mandate: 25, momentum: 25, riskAdj: 25, managerQuality: 25 };
+  if (total === 0) return { sectorAlignment: 25, momentum: 40, holdingsQuality: 35 };
   const factor = 100 / total;
   return Object.fromEntries(
     Object.entries(weights).map(([k, v]) => [k, Math.round(v * factor)])
@@ -1082,7 +1076,7 @@ export default function SetupWizard({ userId, onComplete }) {
     companyFunds: [],
     riskTolerance: 5,
     funds: [],
-    weights: { mandate: 40, momentum: 25, riskAdj: 20, managerQuality: 15 },
+    weights: { sectorAlignment: 25, momentum: 40, holdingsQuality: 35 },
   });
 
   const onChange = useCallback((key, value) => {
@@ -1144,10 +1138,9 @@ export default function SetupWizard({ userId, onComplete }) {
         method: 'POST',
         body: JSON.stringify({
           user_id: userId,
-          mandate_score: normalizedWeights.mandate,
+          sector_alignment: normalizedWeights.sectorAlignment,
           momentum: normalizedWeights.momentum,
-          risk_adj: normalizedWeights.riskAdj,
-          manager_quality: normalizedWeights.managerQuality,
+          holdings_quality: normalizedWeights.holdingsQuality,
           risk_tolerance: data.riskTolerance,
         }),
       });
