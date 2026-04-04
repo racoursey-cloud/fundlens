@@ -23,13 +23,17 @@
 // Also persists to Supabase via saveWorldData().
 
 import { apiFetch, fetchGdelt, fetchRSS } from '../services/api.js';
-import { getEnabledSources, saveWorldData } from '../services/cache.js';
+import { getEnabledSources, getWorldData, saveWorldData } from '../services/cache.js';
 
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
 
 const MS_PER_DAY = 86_400_000;
+
+// World data cache TTL — serves cached macro data for subsequent pipeline runs
+// within this window, preventing redundant GDELT/FRED/Treasury calls.
+const WORLD_TTL_MINS = 30;
 
 function oneYearAgoISO() {
   return new Date(Date.now() - 365 * MS_PER_DAY).toISOString().slice(0, 10);
@@ -243,6 +247,47 @@ function deduplicateHeadlines(headlines) {
 // ---------------------------------------------------------------------------
 
 export async function fetchWorldData(userId, onProgress = () => {}) {
+  // ── Cache check — serve recent world data without hitting external APIs ──
+  try {
+    const cached = await getWorldData();
+    if (cached?.cached_at) {
+      const ageMin = (Date.now() - new Date(cached.cached_at).getTime()) / 60000;
+      if (ageMin < WORLD_TTL_MINS) {
+        onProgress('World data loaded from cache.');
+
+        // Headlines were saved as plain strings — wrap to { title } for thesis.js
+        const cachedHeadlines = Array.isArray(cached.headlines)
+          ? cached.headlines.map(h => typeof h === 'string' ? { title: h } : h)
+          : [];
+
+        // Gold is always fetched fresh (single fast call, not cached in DB)
+        const goldRaw  = await fetchGoldPrice();
+        const todayISO = new Date().toISOString().slice(0, 10);
+        const gold     = goldRaw ? { price: goldRaw, date: todayISO } : null;
+
+        const fredKeys = Object.keys(cached.fred_data ?? {}).filter(k => !k.startsWith('_'));
+
+        return {
+          fred:      cached.fred_data      ?? {},
+          treasury:  cached.treasury_data  ?? null,
+          gold,
+          headlines: cachedHeadlines,
+          fetchedAt: cached.cached_at,
+          dataQuality: {
+            fredSeriesCount:    fredKeys.length,
+            fredSeriesTotal:    fredKeys.length,
+            headlineCount:      cachedHeadlines.length,
+            gdeltHeadlineCount: 0,  // indeterminate from cache
+            fredOk:             fredKeys.length >= 5,
+            gdeltOk:            cachedHeadlines.length > 0,
+          },
+        };
+      }
+    }
+  } catch (err) {
+    console.warn('[world.js] Cache check failed, proceeding with fresh fetch:', err.message);
+  }
+
   onProgress('Loading source configuration…');
 
   // 1. Get every source merged with user overrides (enabled flag resolved).
@@ -341,6 +386,21 @@ export async function fetchWorldData(userId, onProgress = () => {}) {
         console.warn(`[world.js] GDELT query ${i + 1} failed:`, err.message);
       }
     }
+  }
+
+  // ── GDELT stale-on-fail: if all queries returned nothing, supplement
+  //    with cached headlines from the last successful run. Dedup in step 8
+  //    will handle any overlap with fresh RSS titles.
+  if (gdeltRawTitles.length === 0) {
+    try {
+      const cached = await getWorldData();
+      if (cached?.headlines?.length > 0) {
+        for (const h of cached.headlines) {
+          if (typeof h === 'string' && h.length > 0) gdeltRawTitles.push(h);
+        }
+        console.log(`[world.js] GDELT failed — using ${gdeltRawTitles.length} cached headlines as fallback`);
+      }
+    } catch { /* cache read failed — proceed without fallback */ }
   }
 
   // -------------------------------------------------------------------------
