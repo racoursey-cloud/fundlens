@@ -140,7 +140,7 @@ export async function fetchFredSeries(seriesId) {
 // Fetch the current Treasury yield curve via the Railway proxy.
 // Returns: { date, y1, y2, y5, y10, y30 }
 // world.js uses the values to compute four yield spreads (shortEnd, belly,
-// classic, longEnd) which are passed as raw numbers into mandate.js scoring.
+// classic, longEnd) which feed into the thesis generation pipeline.
 
 export async function fetchTreasury() {
   return apiFetch('/api/treasury');
